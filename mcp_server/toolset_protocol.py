@@ -1,0 +1,165 @@
+"""Single source of truth for the toolset-gating protocol text (issue #230).
+
+This protocol — how the agent discovers and enables gated toolsets — was
+duplicated across the server ``instructions`` block and the ``toolset_discovery``
+prompt, risking drift and paying a per-session token cost. Both now compose from
+the constants here.
+
+The gating intro reflects the **effective** default: when
+``GODOT_MCP_DEFAULT_TOOLSETS`` seeds toolsets at startup, the static
+"only core + inspection" claim would tell agents to enable toolsets they
+already have (issue #425).
+"""
+
+from __future__ import annotations
+
+from mcp_server.categories import INSPECTION_TAG
+from mcp_server.toolsets import DEFAULT_ENABLED
+
+DOC_LINKS = (
+    "- Tutorial: https://github.com/hybridindie/godot-mcp/blob/main/docs/tutorial.md\n"
+    "- Tool contracts: https://github.com/hybridindie/godot-mcp/blob/main/docs/tool-contracts.md\n"
+    "- Architecture: https://github.com/hybridindie/godot-mcp/blob/main/docs/architecture.md"
+)
+
+_ENV_DEFAULT_TEXT = (
+    "The default exposure can be overridden by the GODOT_MCP_DEFAULT_TOOLSETS "
+    "environment variable (issue #393): set it to 'all' or a comma-separated "
+    "category list to seed more toolsets at startup."
+)
+
+_DEFAULT_INTRO = (
+    "You are connected to a Godot Editor MCP server that gates its tools into categories "
+    "called 'toolsets'. Only 'core' (diagnostics, toolset management) and 'inspection' "
+    "(read-only project/scene/node reading) are enabled by default. Every other "
+    "capability is hidden until you explicitly enable it."
+)
+
+_SEEDED_INTRO = (
+    "You are connected to a Godot Editor MCP server that gates its tools into categories "
+    "called 'toolsets'. The default exposure is 'core' (diagnostics, toolset "
+    "management) plus the toolsets seeded at startup via GODOT_MCP_DEFAULT_TOOLSETS "
+    "— this server was started with extra toolsets already enabled, so some or all "
+    "categories are available without calling godot_enable_toolset. Always check "
+    "godot_list_toolsets() for the live enabled state."
+)
+
+
+def _gating_intro() -> str:
+    """Build the gating intro from the effective startup default (issue #425).
+
+    Read at import time of *this* module — ``DEFAULT_ENABLED`` is likewise fixed
+    at import (see ``mcp_server.toolsets``), so the two cannot disagree.
+    """
+    if DEFAULT_ENABLED == frozenset({INSPECTION_TAG}):
+        return _DEFAULT_INTRO
+    return _SEEDED_INTRO + "\n\n" + _ENV_DEFAULT_TEXT
+
+
+GATING_INTRO = _gating_intro()
+
+MANDATORY_PROTOCOL = (
+    "MANDATORY PROTOCOL — follow this order exactly:\n"
+    "1. Call godot_get_server_info() for a full capability snapshot "
+    "(toolsets, bridge state, troubleshooting).\n"
+    "2. Call godot_list_toolsets() to see what is available and which are enabled — "
+    "this is the authoritative enabled state, not any static claim in this text.\n"
+    "3. Call godot_enable_toolset(category) for every category you plan to use that "
+    "godot_list_toolsets() reports as disabled. It also accepts a comma-separated list "
+    "of toolsets or a bundle — author / playtest / ship — so a whole workflow is one call.\n"
+    "4. Only after a toolset is enabled can you call the tools in it.\n\n"
+    "WARNING: calling a gated tool whose toolset is disabled fails with "
+    "\"Tool '<name>' is not enabled\". There is NO fallback."
+)
+
+DECISION_TREE = (
+    "QUICK DECISION TREE — what do you want to do?\n"
+    "- Build/edit scenes, add/move/remove nodes, change properties → scene_edit\n"
+    "- Write/attach GDScript, fix parse errors → scripts\n"
+    "- Run the game live in the editor (play, inspect, simulate input) → runtime + input\n"
+    "- Pause/step/inspect stack at a line → debugger + runtime\n"
+    "- Assert a node property meets an expectation → testing + runtime\n"
+    "- Apply changes to many nodes at once → batch + scene_edit\n"
+    "- Physics bodies, collision shapes, gravity/materials → physics + scene_edit\n"
+    "- Register autoloads, create custom resources → resources_edit\n"
+    "- Performance, bottlenecks → profiling\n"
+    "- Circular deps, unused resources, signal flow → analysis\n"
+    "- Export a build for a platform → export\n"
+    "- Import textures/audio/models → asset_import"
+)
+
+COMMON_TOOLSETS = (
+    "Common toolsets you will need:\n"
+    "- scene_edit  → godot_scene_edit_create_node, godot_scene_edit_set_node_property, "
+    "godot_scene_edit_attach_script, godot_scene_edit_save_scene\n"
+    "- scripts     → godot_scripts_write, godot_scripts_read, godot_scripts_get_parse_errors\n"
+    "- runtime     → godot_runtime_run_and_capture (headless), godot_runtime_play_scene (editor)\n"
+    "- input       → godot_input_simulate_action, godot_input_simulate_key, "
+    "godot_input_play_sequence\n"
+    "- testing     → godot_testing_assert_node_state, godot_testing_run_test_scenario\n"
+    "- batch       → godot_batch_set_property, godot_batch_find_nodes_by_type\n"
+    "- physics     → godot_physics_setup_body, godot_physics_setup_collision\n"
+    "- resources_edit → godot_resources_edit_register_autoload, "
+    "godot_resources_edit_create_resource\n"
+    "- asset_import → godot_asset_import_asset, godot_asset_import_create_material_from_textures"
+)
+
+SERVER_VS_ADDON = (
+    "SERVER VS ADDON BOUNDARY:\n"
+    "Some tools run in the Python server (godot_list_toolsets, godot_enable_toolset, "
+    "godot_get_server_info) and never message Godot. Most tools send commands to the Godot "
+    "addon via a WebSocket bridge. \"Tool '<name>' is not enabled\" means the toolset is not "
+    "enabled OR you confused a server-side tool with an addon tool — call "
+    "godot_enable_toolset first."
+)
+
+SAFETY_CONVENTION = (
+    "SAFETY CONVENTION (every mutating tool):\n"
+    "- Mutating tools accept dry_run=True — they report what WOULD change and perform "
+    "nothing. Preview first when unsure.\n"
+    "- Destructive tools (delete/overwrite, e.g. godot_scene_edit_delete_node, "
+    "godot_scene_edit_reload_scene) require "
+    "confirm=True or they refuse to run; they also support dry_run.\n"
+    "- Read-only tools never mutate and need neither flag."
+)
+
+# The three companion skills are client-side (installed into the client's skill dir)
+# and cannot be detected over MCP (#707) — so the text may only advertise them and
+# name the install path, never claim a status. Kept short: this block rides the
+# every-session ``instructions`` payload.
+SKILLS = (
+    "SKILLS (client-side, optional — this server cannot detect them):\n"
+    "This server works without any skill: the protocol above, the workflow prompts, and "
+    "the godot:// resources are the fallback. For best results, copy these three into your "
+    "client's skill directory so they auto-load on matching tasks:\n"
+    "- godot-getting-started    — the MCP workflow (toolset gating, safety, the honesty fields)\n"
+    "- godot-playtest-and-debug — the runtime / play-test loop\n"
+    "- godot-expert             — Godot 4.x engine knowledge and its reference guides\n"
+    "Get them from https://github.com/hybridindie/godot-mcp — clone or download it and copy "
+    "each folder under skills/ into that skill directory, including godot-expert/references/ "
+    "(its guides load on demand). If your client has not loaded them, tell the user to install "
+    "them. Do not assume they are present."
+)
+
+# The full gating protocol, shared verbatim by the server instructions and the
+# toolset_discovery prompt. Edit the parts above; both surfaces stay in sync.
+TOOLSET_PROTOCOL = "\n\n".join(
+    [GATING_INTRO, MANDATORY_PROTOCOL, DECISION_TREE, COMMON_TOOLSETS, SERVER_VS_ADDON]
+)
+
+# What the server advertises as its instructions on every session. Leads with the
+# protocol, then points at the workflow prompts and docs.
+SERVER_INSTRUCTIONS = (
+    "WARNING: You MUST follow the steps below or EVERY tool call will fail.\n\n"
+    + TOOLSET_PROTOCOL
+    + "\n\n"
+    + SAFETY_CONVENTION
+    + "\n\n"
+    + SKILLS
+    + "\n\nDOCUMENTATION:\n"
+    + DOC_LINKS
+    + "\n\nThis server also exposes workflow prompts (toolset_discovery, build_scene, "
+    "play_test, script_edit, debug_scene, troubleshoot) and a diagnostics tool "
+    "(godot_get_server_info) that returns tool counts, bridge state, active scene, and "
+    "common errors with fixes."
+)

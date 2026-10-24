@@ -1,0 +1,736 @@
+"""Smoke checks for the Godot addon scaffold (issue #1).
+
+The addon side cannot be unit-tested by running Godot here, so these pin the
+parts that are statically checkable: the ``plugin.cfg`` manifest is well-formed
+and points at a real ``@tool extends EditorPlugin`` script, the project enables
+the plugin, and the addon version stays in lockstep with the Python package
+(both CalVer). Loading the plugin in the Godot 4.4 editor is the addon-side
+preflight (see .opencode/rules/workflow.md).
+"""
+
+from __future__ import annotations
+
+import configparser
+import re
+from pathlib import Path
+
+import pytest
+
+import mcp_server
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+ADDON_DIR = REPO_ROOT / "godot" / "addons" / "godot_mcp"
+PLUGIN_CFG = ADDON_DIR / "plugin.cfg"
+PROJECT_GODOT = REPO_ROOT / "godot" / "project.godot"
+CALVER = re.compile(r"^\d{4}\.\d{2}\.\d{2}(?:[-.]?(?:\d+|(?:a|b|rc)\d+))?$")
+
+
+@pytest.fixture
+def plugin_cfg() -> configparser.ConfigParser:
+    parser = configparser.ConfigParser()
+    parser.read(PLUGIN_CFG)
+    return parser
+
+
+def test_plugin_cfg_exists() -> None:
+    assert PLUGIN_CFG.is_file(), f"missing addon manifest at {PLUGIN_CFG}"
+
+
+@pytest.mark.parametrize("key", ["name", "description", "author", "version", "script"])
+def test_plugin_cfg_has_required_keys(plugin_cfg: configparser.ConfigParser, key: str) -> None:
+    assert plugin_cfg.has_option("plugin", key), f"plugin.cfg [plugin] missing {key!r}"
+    assert plugin_cfg.get("plugin", key).strip('"'), f"plugin.cfg {key!r} is empty"
+
+
+def test_plugin_script_exists_and_is_editor_plugin(
+    plugin_cfg: configparser.ConfigParser,
+) -> None:
+    script_name = plugin_cfg.get("plugin", "script").strip('"')
+    script_path = ADDON_DIR / script_name
+    assert script_path.is_file(), f"plugin script {script_name!r} not found"
+    source = script_path.read_text()
+    assert "@tool" in source, "addon script must carry @tool"
+    assert "extends EditorPlugin" in source, "addon entry must extend EditorPlugin"
+
+
+def test_addon_ships_a_copy_of_the_project_license() -> None:
+    """Godot's Asset Library guidance: a plugin should carry the license in its
+    own folder, so users who install it keep the license with the addon."""
+    addon_license = ADDON_DIR / "LICENSE"
+    root_license = REPO_ROOT / "LICENSE"
+    assert addon_license.is_file(), "addon must ship LICENSE in its own folder"
+    assert addon_license.read_text(encoding="utf-8") == root_license.read_text(
+        encoding="utf-8"
+    ), "addon LICENSE drifted from the repository LICENSE"
+    text = addon_license.read_text(encoding="utf-8")
+    assert "MIT License" in text
+    assert "Copyright (c)" in text
+
+
+def test_addon_version_matches_package(plugin_cfg: configparser.ConfigParser) -> None:
+    version = plugin_cfg.get("plugin", "version").strip('"')
+    assert CALVER.match(version), f"addon version {version!r} is not CalVer"
+    assert version == mcp_server.__version__, "addon and server versions drifted"
+
+
+def test_project_godot_enables_plugin() -> None:
+    assert PROJECT_GODOT.is_file(), "godot/project.godot must exist so the addon is loadable"
+    text = PROJECT_GODOT.read_text()
+    assert "res://addons/godot_mcp/plugin.cfg" in text, "project must enable the godot_mcp plugin"
+
+
+def test_dock_script_exists_and_is_tool() -> None:
+    dock = ADDON_DIR / "mcp_dock.gd"
+    assert dock.is_file(), "status dock script mcp_dock.gd must exist"
+    source = dock.read_text()
+    assert "@tool" in source, "dock script must carry @tool"
+    assert "class_name MCPStatusDock" in source, "dock must expose a class_name for typed use"
+    # The dock is read-only this phase: no editor mutation API leaks into it.
+    assert "EditorInterface" not in source, "dock must stay editor-independent (plugin feeds it)"
+
+
+def test_plugin_wires_the_dock() -> None:
+    source = (ADDON_DIR / "godot_mcp.gd").read_text()
+    assert "MCPStatusDock" in source, "plugin must instantiate the typed dock"
+    # #602: 4.6+ uses EditorDock/add_dock; the 4.4/4.5 floor keeps the legacy
+    # bottom panel. Both must be present, resolved dynamically on the floor.
+    assert 'ClassDB.class_exists("EditorDock")' in source
+    assert 'call("add_dock"' in source
+    assert 'call("remove_dock"' in source
+    assert "add_control_to_bottom_panel" in source, "plugin must keep the 4.4/4.5 fallback"
+    assert "remove_control_from_bottom_panel" in source, (
+        "plugin must remove the legacy dock on _exit_tree"
+    )
+
+
+def test_command_router_exists() -> None:
+    router = ADDON_DIR / "command_router.gd"
+    assert router.is_file(), "command_router.gd must exist"
+    source = router.read_text()
+    assert "@tool" in source
+    assert "class_name MCPCommandRouter" in source
+
+
+def test_bridge_uses_websocket_transport() -> None:
+    bridge = ADDON_DIR / "mcp_bridge.gd"
+    assert bridge.is_file(), "mcp_bridge.gd must exist"
+    source = bridge.read_text()
+    assert "@tool" in source
+    assert "class_name MCPBridge" in source
+    # The bridge is a WebSocket *client* now (#276): it connects out to the server's
+    # listener and reconnects, rather than running a TCPServer.
+    assert "WebSocketPeer" in source, "bridge must use WebSocketPeer"
+    assert "connect_to_url" in source, "bridge must connect out as a client"
+    assert "TCPServer" not in source, "bridge no longer listens (direction inverted, #276)"
+
+
+def test_bridge_buffers_admit_full_screenshot_frames() -> None:
+    """#563: Godot's default 64 KB WebSocketPeer buffers silently drop any
+    screenshot response over 64 KB (ERR_OUT_OF_MEMORY from wslay), and the
+    caller then times out. _open() must raise both buffers before
+    connect_to_url so a full 3D gameplay frame transfers."""
+    bridge = ADDON_DIR / "mcp_bridge.gd"
+    source = bridge.read_text()
+    _open = source.split("func _open()", 1)[1].split("\nfunc ", 1)[0]
+    assert "outbound_buffer_size" in _open, "_open() must raise the outbound buffer"
+    assert "inbound_buffer_size" in _open, "_open() must raise the inbound buffer"
+    # Both must be set BEFORE the actual connect call (the peer applies them at connect).
+    assert _open.index("outbound_buffer_size") < _open.index("_peer.connect_to_url")
+    assert _open.index("inbound_buffer_size") < _open.index("_peer.connect_to_url")
+
+
+def test_plugin_wires_the_bridge() -> None:
+    source = (ADDON_DIR / "godot_mcp.gd").read_text()
+    assert "MCPBridge" in source, "plugin must start the bridge"
+    # _exit_tree() disposes the bridge: it stops the connection and releases the
+    # router, breaking the router/handler RefCounted cycle that otherwise leaked
+    # at editor exit (tests/integration/test_addon_exit_leaks.py).
+    assert "_bridge.dispose()" in source, "plugin must dispose the bridge on _exit_tree"
+    bridge = (ADDON_DIR / "mcp_bridge.gd").read_text()
+    assert "func dispose()" in bridge, "the bridge owns the teardown"
+
+
+def test_inspection_helpers_exist() -> None:
+    coerce = ADDON_DIR / "type_coerce.gd"
+    inspect = ADDON_DIR / "scene_inspect.gd"
+    assert coerce.is_file() and "class_name MCPTypeCoerce" in coerce.read_text()
+    assert inspect.is_file() and "class_name MCPSceneInspect" in inspect.read_text()
+
+
+def test_router_registers_inspection_commands() -> None:
+    sources = [ADDON_DIR / "command_router.gd", ADDON_DIR / "handlers" / "scene_inspect.gd"]
+    for src in sources:
+        assert src.exists(), f"required source missing: {src}"
+    combined = "".join(src.read_text() for src in sources)
+    # Wire commands are cmd_-prefixed (the handler name); see docs/architecture.md.
+    for command in (
+        "cmd_get_project_info",
+        "cmd_get_active_scene",
+        "cmd_list_scenes",
+        "cmd_get_scene_tree",
+        "cmd_get_selected_node",
+        "cmd_get_node_properties",
+    ):
+        assert f'"{command}"' in combined, f"router must register {command}"
+
+
+def test_router_registers_mutation_commands() -> None:
+    source = "".join(f.read_text() for f in ADDON_DIR.rglob("*.gd"))
+    for command in (
+        "cmd_create_node",
+        "cmd_rename_node",
+        "cmd_set_node_property",
+        "cmd_delete_node",
+        "cmd_attach_script",
+        "cmd_connect_signal",
+        "cmd_save_scene",
+        "cmd_create_scene",
+        "cmd_instance_scene",
+    ):
+        assert f'"{command}"' in source, f"router must register {command}"
+
+
+def test_router_registers_script_commands() -> None:
+    source = "".join(f.read_text() for f in ADDON_DIR.rglob("*.gd"))
+    for command in (
+        "cmd_read_script",
+        "cmd_list_scripts",
+        "cmd_get_script_for_node",
+        "cmd_write_script",
+        "cmd_patch_script",
+    ):
+        assert f'"{command}"' in source, f"router must register {command}"
+
+
+def test_script_write_kicks_a_deferred_filesystem_rescan() -> None:
+    """#417: a script write must trigger the editor's async scan so new
+    ``class_name`` globals are indexed before the agent's next get_parse_errors —
+    otherwise the parser reports transient "Could not find type" errors for
+    correct code and the agent 'fixes' phantom errors."""
+    entry = (ADDON_DIR / "godot_mcp.gd").read_text()
+    assert "command_completed" in entry
+    # Isolate the handler body by its signature — splitting on the bare name can
+    # straddle two occurrences (Qodo #449 review).
+    hook = entry.split("func _on_command_completed", 1)[1].split("\nfunc ", 1)[0]
+    # #520: the hook receives exec time; #589: plus the response verdict.
+    hook_sig = (
+        "func _on_command_completed(command: String, exec_ms: float, ok: bool, error_code: String)"
+    )
+    assert hook_sig in entry
+    assert "log_command_result(command, ok, error_code)" in hook
+    assert "_rescan_after_script_write.call_deferred()" in hook
+    rescan = entry.split("func _rescan_after_script_write", 1)[1].split("\nfunc ", 1)[0]
+    assert "scan()" in rescan
+    assert "get_resource_filesystem" in rescan
+
+
+def test_delete_node_invalidates_the_prop_cache() -> None:
+    """#540: mutation paths that change an object's identity or property list must
+    erase its property-type cache entry — Godot reuses instance ids after free,
+    so a lingering entry would be served for a new object with the same id (stale
+    property types), and an attached script adds exported vars to the list."""
+    mutation = (ADDON_DIR / "handlers" / "mutation.gd").read_text()
+    delete_handler = mutation.split("func _cmd_delete_node", 1)[1].split("\n\n\n", 1)[0]
+    assert "invalidate_prop_cache" in delete_handler
+    attach_handler = mutation.split("func _cmd_attach_script", 1)[1].split("\n\n\n", 1)[0]
+    assert "invalidate_prop_cache" in attach_handler
+
+
+def test_bridge_command_completed_reports_exec_and_outcome() -> None:
+    """#520: ``command_completed`` reports ONE honest number — handler exec time.
+    The old 3-arg form (exec + mislabeled round-trip latency backed by a
+    never-populated ``_pending_times`` dict) is dead code and must be gone.
+    #589: the signal also carries the response verdict (ok + error code) so the
+    dock logs outcomes, not dispatch."""
+    bridge = (ADDON_DIR / "mcp_bridge.gd").read_text()
+    assert (
+        "command_completed(command: String, exec_ms: float, ok: bool, error_code: String)" in bridge
+    )
+    assert "_pending_times" not in bridge, "dead timing state must be removed"
+    assert "latency_ms" not in bridge, "mislabeled latency must be removed"
+    # The verdict is read from the response envelope, not guessed.
+    assert 'bool(response.get("ok", false))' in bridge
+
+
+def test_dock_logs_outcomes_not_dispatch() -> None:
+    """#589: the dock's recent-command log is fed from ``command_completed``
+    (outcome-bearing), not ``command_received`` (dispatch) — a failed command
+    must read differently from a successful one."""
+    plugin = (ADDON_DIR / "godot_mcp.gd").read_text()
+    dock = (ADDON_DIR / "mcp_dock.gd").read_text()
+    assert "command_received.connect(_dock.log_command)" not in plugin, (
+        "the dispatch-time log wiring must be gone (#589)"
+    )
+    assert "log_command_result" in dock
+    assert "func log_command_result(command: String, ok: bool, error_code: String)" in dock
+    assert "func log_command(" not in dock, "legacy name-only log path must be gone"
+
+
+def test_replaced_peer_state_and_reconnect_logging() -> None:
+    """#593: a taken-over editor must not keep showing a green 'Connected' while
+    its commands go to another editor, and a flapping link must explain itself.
+
+    Pins the wiring: the bridge holds a distinct REPLACED status and an
+    ``event_logged`` signal, maps the server's PEER_REPLACED notice onto both,
+    stops reconnecting once replaced, and logs one line per retry attempt; the
+    plugin feeds ``event_logged`` into the dock's shared log; the dock renders a
+    non-green REPLACED state and accepts event lines."""
+    bridge = (ADDON_DIR / "mcp_bridge.gd").read_text()
+    plugin = (ADDON_DIR / "godot_mcp.gd").read_text()
+    dock = (ADDON_DIR / "mcp_dock.gd").read_text()
+
+    assert "enum Status { DISCONNECTED, CONNECTING, CONNECTED, REPLACED }" in bridge
+    assert "signal event_logged(message: String)" in bridge
+    assert 'code == "PEER_REPLACED"' in bridge, "the notice must map to REPLACED"
+    assert "_set_status(Status.REPLACED)" in bridge
+    # The replaced editor stops reconnecting (no fight for the bridge).
+    replaced_block = bridge.split('if code == "PEER_REPLACED"', 1)[1].split("return", 1)[0]
+    assert "_active = false" in replaced_block
+    assert "_start_probe()" in replaced_block, "the replaced editor must probe for a free bridge"
+    assert "_PROBE_MIN" in bridge and "_promote_probe" in bridge
+    assert 'rstrip("/") + "/probe"' in bridge
+    # One dock line per retry attempt, not per process tick.
+    retry = bridge.split("func _schedule_retry", 1)[1].split("\nfunc ", 1)[0]
+    assert "_retry_attempt += 1" in retry
+    assert "reconnecting (attempt %d" in retry
+
+    assert "event_logged.connect(_on_bridge_event)" in plugin
+    assert "func _on_bridge_event" in plugin
+    assert "log_event" in plugin
+
+    assert "ConnectionStatus.REPLACED" in dock
+    assert "Replaced by another editor" in dock
+    assert "func log_event(message: String)" in dock
+
+
+def test_dock_surfaces_the_undo_guarantee() -> None:
+    """#590: the dock shows the most recent undoable action + how to revert, so
+    the human sees what the agent changed without opening Undo History. The
+    router exposes a read-only snapshot; the plugin feeds it on the poll tick
+    and after each completed command; the dock renders the Ctrl+Z hint."""
+    router = (ADDON_DIR / "command_router.gd").read_text()
+    plugin = (ADDON_DIR / "godot_mcp.gd").read_text()
+    dock = (ADDON_DIR / "mcp_dock.gd").read_text()
+
+    assert "func history_snapshot() -> Dictionary" in router
+    assert "get_current_action_name()" in router.split("func history_snapshot", 1)[1]
+    assert "func _update_last_action()" in plugin
+    assert "history_snapshot()" in plugin
+    assert "set_last_action(action)" in plugin
+
+    assert "func set_last_action(action: String)" in dock
+    assert "Ctrl+Z to undo" in dock
+    assert "func displayed_last_action()" in dock
+
+
+def test_dock_shows_dirty_scene_and_play_state() -> None:
+    """#591: the dock reflects two states the human needs but it didn't show —
+    unsaved (dirty) scene edits, and a running play session with the agent's
+    runtime probe state. Both are fed on the existing 2s poll tick."""
+    plugin = (ADDON_DIR / "godot_mcp.gd").read_text()
+    dock = (ADDON_DIR / "mcp_dock.gd").read_text()
+
+    assert "func _update_editor_state_rows()" in plugin
+    assert "unsaved_scenes()" in plugin
+    assert "EditorInterface.is_playing_scene()" in plugin
+    assert "is_connected_to_probe()" in plugin
+    assert "set_scene_dirty(scene, dirty)" in plugin
+    assert "set_play_state(playing, probe, scene)" in plugin
+
+    assert "func set_scene_dirty(scene_name: String, dirty: bool)" in dock
+    assert "●" in dock
+    assert "func set_play_state(playing: bool, probe_connected: bool" in dock
+    assert "probe connected" in dock
+    assert "func displayed_play_state()" in dock
+
+
+def test_dock_toolsets_row_is_fed_not_dead() -> None:
+    """#592: the dock's Toolsets row was dead code (always "(none)"). The server
+    pushes the enabled set on connect and after each toggle; the addon stores it
+    and the plugin feeds the dock. Before the first push the state is unknown
+    ("(unknown)"), not the old lie "(none)"."""
+    router = (ADDON_DIR / "command_router.gd").read_text()
+    plugin = (ADDON_DIR / "godot_mcp.gd").read_text()
+    dock = (ADDON_DIR / "mcp_dock.gd").read_text()
+
+    assert '_handlers["cmd_toolsets_update"] = _cmd_toolsets_update' in router
+    assert "var enabled_toolsets := PackedStringArray()" in router
+    assert "var toolsets_known := false" in router
+    assert "toolsets_known = true" in router
+    assert "_router.enabled_toolsets" in plugin
+    assert "_router.toolsets_known" in plugin
+    assert "set_toolsets_unknown()" in dock
+    # The initial default is unknown, not "(none)".
+    init = dock.split("func _init", 1)[1]
+    assert "set_toolsets_unknown()" in init
+
+
+def test_dock_log_polish() -> None:
+    """#594: the recent-command log is deeper (a 20-command burst must not evict
+    it), copyable (the log is what bug reports want), and the command count is
+    session-scoped (reset on reconnect), labelled honestly."""
+    dock = (ADDON_DIR / "mcp_dock.gd").read_text()
+
+    assert "const MAX_LOG_ENTRIES := 50" in dock, "log depth must hold a 20-command burst"
+    assert "func copy_log_to_clipboard()" in dock
+    assert "DisplayServer.clipboard_set" in dock
+    assert "_copy_button" in dock
+    # Session-scoped count: reset on a fresh CONNECTED transition.
+    assert '"This session:"' in dock
+    status = dock.split("func set_connection_status", 1)[1].split("\nfunc ", 1)[0]
+    assert "_command_count = 0" in status
+
+
+def test_router_registers_node_parity_commands() -> None:
+    source = "".join(f.read_text() for f in ADDON_DIR.rglob("*.gd"))
+    for command in (
+        "cmd_duplicate_node",
+        "cmd_move_node",
+        "cmd_add_to_group",
+        "cmd_remove_from_group",
+        "cmd_list_signal_connections",
+        "cmd_disconnect_signal",
+    ):
+        assert f'"{command}"' in source, f"router must register {command}"
+
+
+def test_router_registers_composite_commands() -> None:
+    source = "".join(f.read_text() for f in ADDON_DIR.rglob("*.gd"))
+    for command in ("cmd_compose_node", "cmd_batch_create_nodes", "cmd_apply_node_edits"):
+        assert f'"{command}"' in source, f"router must register {command}"
+    # #528: the composites' tree mutations route through the ONE shared
+    # N-child commit (mcp_helpers.commit_add_children) — no handler hand-rolls
+    # an add-child undo block, so composite.gd hosts no create_action at all.
+    # (apply_node_edits keeps its property-only action — it touches no tree.)
+    composite = (ADDON_DIR / "handlers" / "composite.gd").read_text()
+    assert composite.count(".create_action(") == 1, (
+        "composite tree mutations must commit via mcp_helpers.commit_add_children (#528)"
+    )
+    assert composite.count(".commit_action(") == 1
+    helpers = (ADDON_DIR / "mcp_helpers.gd").read_text()
+    assert "func commit_add_children(" in helpers, (
+        "the shared N-child commit must live in mcp_helpers.gd (#528)"
+    )
+
+
+def test_router_registers_resource_commands() -> None:
+    source = "".join(f.read_text() for f in ADDON_DIR.rglob("*.gd"))
+    for command in (
+        "cmd_read_resource",
+        "cmd_create_resource",
+        "cmd_set_resource_property",
+        "cmd_register_autoload",
+        "cmd_unregister_autoload",
+    ):
+        assert f'"{command}"' in source, f"router must register {command}"
+
+
+def test_router_registers_project_fs_commands() -> None:
+    source = "".join(f.read_text() for f in ADDON_DIR.rglob("*.gd"))
+    for command in (
+        "cmd_get_filesystem_tree",
+        "cmd_search_files",
+        "cmd_get_setting",
+        "cmd_set_setting",
+        "cmd_path_to_uid",
+        "cmd_uid_to_path",
+    ):
+        assert f'"{command}"' in source, f"router must register {command}"
+
+
+def test_router_registers_editor_commands() -> None:
+    source = "".join(f.read_text() for f in ADDON_DIR.rglob("*.gd"))
+    assert '"cmd_capture_editor_screenshot"' in source
+    # Capture uses the verified Image → base64 PNG chain.
+    assert "save_png_to_buffer" in source and "raw_to_base64" in source
+
+
+def test_router_registers_physics_commands() -> None:
+    source = "".join(f.read_text() for f in ADDON_DIR.rglob("*.gd"))
+    for command in (
+        "cmd_setup_physics_body",
+        "cmd_setup_collision",
+        "cmd_set_physics_layers",
+        "cmd_add_raycast",
+    ):
+        assert f'"{command}"' in source, f"router must register {command}"
+
+
+def test_router_registers_animation_commands() -> None:
+    source = "".join(f.read_text() for f in ADDON_DIR.rglob("*.gd"))
+    for command in (
+        "cmd_create_animation",
+        "cmd_add_animation_track",
+        "cmd_insert_keyframe",
+        "cmd_create_animation_tree",
+        "cmd_add_state_machine_state",
+        "cmd_set_blend_tree_node",
+    ):
+        assert f'"{command}"' in source, f"router must register {command}"
+
+
+def test_router_registers_scene_3d_commands() -> None:
+    source = "".join(f.read_text() for f in ADDON_DIR.rglob("*.gd"))
+    for command in (
+        "cmd_add_mesh_instance",
+        "cmd_setup_camera",
+        "cmd_setup_lighting",
+        "cmd_setup_environment",
+        "cmd_gridmap_set_cell",
+    ):
+        assert f'"{command}"' in source, f"router must register {command}"
+
+
+def test_router_registers_particle_commands() -> None:
+    source = "".join(f.read_text() for f in ADDON_DIR.rglob("*.gd"))
+    for command in (
+        "cmd_create_particles",
+        "cmd_set_particle_material",
+        "cmd_set_particle_color_gradient",
+        "cmd_apply_particle_preset",
+    ):
+        assert f'"{command}"' in source, f"router must register {command}"
+
+
+def test_router_registers_navigation_commands() -> None:
+    source = "".join(f.read_text() for f in ADDON_DIR.rglob("*.gd"))
+    for command in (
+        "cmd_setup_navigation_region",
+        "cmd_setup_navigation_agent",
+        "cmd_bake_navigation_mesh",
+        "cmd_set_navigation_layers",
+    ):
+        assert f'"{command}"' in source, f"router must register {command}"
+
+
+def test_router_registers_audio_commands() -> None:
+    source = "".join(f.read_text() for f in ADDON_DIR.rglob("*.gd"))
+    for command in (
+        "cmd_add_audio_player",
+        "cmd_get_audio_bus_layout",
+        "cmd_add_audio_bus",
+        "cmd_add_audio_bus_effect",
+    ):
+        assert f'"{command}"' in source, f"router must register {command}"
+
+
+def test_router_registers_tilemap_commands() -> None:
+    source = "".join(f.read_text() for f in ADDON_DIR.rglob("*.gd"))
+    for command in (
+        "cmd_tilemap_set_cell",
+        "cmd_tilemap_fill_rect",
+        "cmd_tilemap_get_cell",
+        "cmd_tilemap_clear",
+        "cmd_tilemap_layers",
+    ):
+        assert f'"{command}"' in source, f"router must register {command}"
+
+
+def test_router_registers_theme_ui_commands() -> None:
+    source = "".join(f.read_text() for f in ADDON_DIR.rglob("*.gd"))
+    for command in (
+        "cmd_create_theme",
+        "cmd_set_theme_color",
+        "cmd_set_theme_font_size",
+        "cmd_set_theme_stylebox",
+    ):
+        assert f'"{command}"' in source, f"router must register {command}"
+
+
+def test_router_registers_shader_commands() -> None:
+    source = "".join(f.read_text() for f in ADDON_DIR.rglob("*.gd"))
+    for command in (
+        "cmd_create_shader",
+        "cmd_read_shader",
+        "cmd_assign_shader_material",
+        "cmd_set_shader_param",
+    ):
+        assert f'"{command}"' in source, f"router must register {command}"
+
+
+def test_router_registers_runtime_session_commands() -> None:
+    source = "".join(f.read_text() for f in ADDON_DIR.rglob("*.gd"))
+    for command in (
+        "cmd_play_scene",
+        "cmd_stop_scene",
+        "cmd_is_playing",
+        "cmd_get_game_scene_tree",
+    ):
+        assert f'"{command}"' in source, f"router must register {command}"
+
+
+def test_runtime_session_addon_files_present() -> None:
+    # The EditorDebuggerPlugin captures the played game's godot_mcp channel; the probe
+    # autoload (game-side) answers its queries. Both must ship in the addon (issue #66).
+    debugger = ADDON_DIR / "mcp_debugger.gd"
+    probe = ADDON_DIR / "mcp_runtime_probe.gd"
+    assert debugger.exists() and "EditorDebuggerPlugin" in debugger.read_text()
+    assert probe.exists() and "register_message_capture" in probe.read_text()
+    # The plugin entry must register/unregister the debugger plugin and wire it to the router.
+    entry = (ADDON_DIR / "godot_mcp.gd").read_text()
+    assert "add_debugger_plugin" in entry and "remove_debugger_plugin" in entry
+    assert "set_debugger" in entry
+
+
+def test_debugger_single_active_session_contract() -> None:
+    """#454: the engine caps concurrent debug sessions per editor (4 active —
+    EditorDebuggerNode) and prints "Max client limits reached" only from its DAP/LSP
+    servers, so a session leak is otherwise invisible. The plugin must enforce a
+    one-active-session contract itself: when a new session is set up, any prior
+    session's signal wiring is dropped, multiple live sessions are logged with
+    their ids, and a new session's arrival resets the probe state even if its
+    ``started`` signal never fires (orphaned-session recovery)."""
+    src = (ADDON_DIR / "mcp_debugger.gd").read_text()
+    setup = src.split("func _setup_session", 1)[1].split("\nfunc ", 1)[0]
+    # The setup must disconnect the previous session's signals (no accumulating lambdas
+    # over repeated play/stop cycles) and adopt the new session immediately.
+    assert "_detach_previous_session" in setup
+    detach = src.split("func _detach_previous_session", 1)[1].split("\nfunc ", 1)[0]
+    # Round-2 review: disconnect ONLY the plugin's own tracked callables — a blanket
+    # disconnect would break the editor's own debugger tab bookkeeping.
+    assert "_owned_connections" in detach
+    assert "disconnect" in detach
+    assert "_owned_connections.clear" in detach
+    # The setup must track exactly what it connects.
+    assert "_owned_connections = [" in setup
+    # Diagnosability: when a new session arrives while another is still active, log it
+    # (the only signal short of the engine's own DAP/LSP "max client limits" line).
+    assert "push_warning" in src or "print" in src
+
+
+def test_runtime_handlers_surface_probe_connect_diagnostic() -> None:
+    """#454: when a play session is active but the probe never announces (engine
+    caps exhausted → silent debugger unresponsiveness), the runtime-session
+    handlers must say so with an actionable hint, not just ``connected: false``."""
+    source = "".join(f.read_text() for f in ADDON_DIR.rglob("*.gd"))
+    assert "probe_never_connected" in source or "max client limits" in source.lower()
+
+
+def test_router_registers_scene_session_commands() -> None:
+    source = "".join(f.read_text() for f in ADDON_DIR.rglob("*.gd"))
+    for command in (
+        "cmd_open_scene",
+        "cmd_reload_scene",
+        "cmd_save_all_scenes",
+        "cmd_list_open_scenes",
+        "cmd_select_nodes",
+    ):
+        assert f'"{command}"' in source, f"router must register {command}"
+
+
+def test_router_registers_input_map_commands() -> None:
+    source = "".join(f.read_text() for f in ADDON_DIR.rglob("*.gd"))
+    for command in (
+        "cmd_add_input_action",
+        "cmd_remove_input_action",
+        "cmd_add_input_event",
+        "cmd_clear_input_action_events",
+    ):
+        assert f'"{command}"' in source, f"router must register {command}"
+
+
+def test_router_registers_input_sim_commands() -> None:
+    source = "".join(f.read_text() for f in ADDON_DIR.rglob("*.gd"))
+    for command in (
+        "cmd_simulate_key",
+        "cmd_simulate_mouse",
+        "cmd_simulate_action",
+        "cmd_play_input_sequence",
+        "cmd_get_input_stats",
+    ):
+        assert f'"{command}"' in source, f"router must register {command}"
+    # The runtime probe must inject via Input.parse_input_event / action_press.
+    probe = (ADDON_DIR / "mcp_runtime_probe.gd").read_text()
+    assert "parse_input_event" in probe and "action_press" in probe
+
+
+def test_router_registers_runtime_inspect_commands() -> None:
+    source = "".join(f.read_text() for f in ADDON_DIR.rglob("*.gd"))
+    for command in (
+        "cmd_monitor_property",
+        "cmd_get_property_samples",
+        "cmd_find_ui_elements",
+        "cmd_read_property",
+    ):
+        assert f'"{command}"' in source, f"router must register {command}"
+    # The probe must sample properties and collect Control nodes with their rect.
+    probe = (ADDON_DIR / "mcp_runtime_probe.gd").read_text()
+    assert "_start_monitor" in probe and "get_global_rect" in probe
+
+
+def test_router_registers_input_recording_commands() -> None:
+    source = "".join(f.read_text() for f in ADDON_DIR.rglob("*.gd"))
+    for command in ("cmd_record_input", "cmd_stop_recording", "cmd_get_recording"):
+        assert f'"{command}"' in source, f"router must register {command}"
+    # The probe must capture input via _input and serialize events for replay.
+    probe = (ADDON_DIR / "mcp_runtime_probe.gd").read_text()
+    assert "func _input(" in probe and "_serialize_event" in probe
+
+
+def test_router_registers_profiling_commands() -> None:
+    source = "".join(f.read_text() for f in ADDON_DIR.rglob("*.gd"))
+    for command in ("cmd_get_editor_performance", "cmd_get_performance_monitors"):
+        assert f'"{command}"' in source, f"router must register {command}"
+    assert "Performance.get_monitor" in source  # editor snapshot reads the monitors
+    probe = (ADDON_DIR / "mcp_runtime_probe.gd").read_text()
+    assert "_performance_snapshot" in probe  # the probe answers get_performance
+
+
+def test_router_registers_game_capture_commands() -> None:
+    source = "".join(f.read_text() for f in ADDON_DIR.rglob("*.gd"))
+    assert '"cmd_capture_game_screenshot"' in source
+    # The probe must grab the game's own viewport (issue #446) — the game runs
+    # as a separate child process, so its viewport exists only in-process.
+    probe = (ADDON_DIR / "mcp_runtime_probe.gd").read_text()
+    assert "capture_frame" in probe and "godot_mcp:game_frame" in probe
+    assert "get_viewport" in probe and "save_png_to_buffer" in probe
+
+
+def test_router_registers_batch_commands() -> None:
+    source = "".join(f.read_text() for f in ADDON_DIR.rglob("*.gd"))
+    for command in (
+        "cmd_find_nodes_by_type",
+        "cmd_batch_set_property",
+        "cmd_cross_scene_set_property",
+        "cmd_get_dependencies",
+    ):
+        assert f'"{command}"' in source, f"router must register {command}"
+    # cross-scene edits load with GEN_EDIT_STATE_MAIN and re-pack/save faithfully.
+    assert "GEN_EDIT_STATE_MAIN" in source and "ResourceLoader.get_dependencies" in source
+
+
+def test_router_registers_export_commands() -> None:
+    source = "".join(f.read_text() for f in ADDON_DIR.rglob("*.gd"))
+    for command in ("cmd_list_export_presets", "cmd_get_export_info"):
+        assert f'"{command}"' in source, f"router must register {command}"
+    # presets are read from export_presets.cfg via Godot's ConfigFile.
+    assert "export_presets.cfg" in source and "ConfigFile" in source
+
+
+def test_plugin_declares_minimum_godot_version() -> None:
+    # The addon supports Godot 4.4+ and warns (not crashes) on older editors (issue #86).
+    entry = (ADDON_DIR / "godot_mcp.gd").read_text()
+    assert "MIN_GODOT_MAJOR := 4" in entry and "MIN_GODOT_MINOR := 4" in entry
+    assert "_warn_if_unsupported_version" in entry
+    assert "Engine.get_version_info()" in entry
+    # The example project itself targets 4.7 (validated on 4.7-stable, #200); the
+    # addon's support floor above stays 4.4+. The feature string flags older editor opens.
+    assert '"4.7"' in PROJECT_GODOT.read_text()
+
+
+def test_mutations_use_undo_redo() -> None:
+    source = "".join(f.read_text() for f in ADDON_DIR.rglob("*.gd"))
+    # Every create/rename/delete/set must register with EditorUndoRedoManager.
+    assert "get_editor_undo_redo" in source
+    assert source.count("create_action") >= 6  # the UndoRedo-wrapped mutations
+
+
+def test_router_registers_node_persistence_probe() -> None:
+    # #458 round-2: dry-run previews need a read-only persistence probe so they
+    # can be honest about instanced children without mutating.
+    source = "".join(f.read_text() for f in ADDON_DIR.rglob("*.gd"))
+    assert '"cmd_node_persistence"' in source
+    # The helper must consult EditableChildren state (is_editable_instance), not
+    # just the owner chain — editable instances DO persist their overrides.
+    debugger_or_router = "".join(f.read_text() for f in ADDON_DIR.rglob("*.gd"))
+    assert "is_editable_instance" in debugger_or_router

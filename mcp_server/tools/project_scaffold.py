@@ -1,0 +1,103 @@
+"""Project scaffold tool (issue #112).
+
+Generates a project skeleton (directories, settings, autoloads, root scene)
+for common game types so agents start from a known structure instead of a
+blank project.  This is not a template system — it creates empty nodes,
+generic scripts, and configuration values that the agent can build on with
+existing tools.
+
+Gated ``project_scaffold`` toolset.
+"""
+
+from __future__ import annotations
+
+from fastmcp import FastMCP
+
+from mcp_server.bridge import Bridge
+from mcp_server.categories import PROJECT_SCAFFOLD_TAG
+from mcp_server.models.project_scaffold import ScaffoldProjectResult
+from mcp_server.safety import (
+    DESTRUCTIVE,
+    enforce_preconditions,
+    require_confirmation,
+)
+from mcp_server.tools._route import route
+
+PROJECT_SCAFFOLD = {PROJECT_SCAFFOLD_TAG}
+
+# Supported scaffold types.
+_SCAFFOLD_TYPES: set[str] = {
+    "2d_platformer",
+    "3d_fps",
+    "top_down_rpg",
+    "visual_novel",
+}
+
+
+# ---------------------------------------------------------------------------
+# Public tool registration
+# ---------------------------------------------------------------------------
+
+
+def register_project_scaffold(
+    mcp: FastMCP, bridge: Bridge
+) -> None:
+    """Register the project scaffold tool."""
+
+    @mcp.tool(meta=DESTRUCTIVE, tags=PROJECT_SCAFFOLD)
+    @enforce_preconditions
+    async def scaffold_project(
+        type: str,
+        project_name: str = "",
+        main_scene: str = "",
+        confirm: bool = False,
+        dry_run: bool = False,
+    ) -> ScaffoldProjectResult:
+        """Scaffold a project skeleton for ``type``.
+
+        Supported types: ``"2d_platformer"`` | ``"3d_fps"`` | ``"top_down_rpg"`` |
+        ``"visual_novel"``. Creates directories, sets rendering/window defaults,
+        registers autoloads, and creates a root scene. Requires ``confirm=True``
+        because it mutates the project filesystem broadly.
+
+        All-or-nothing: if a step fails, created files/directories and settings are
+        rolled back before the structured error is returned.
+        """
+        if type not in _SCAFFOLD_TYPES:
+            raise ValueError(
+                f"Unknown scaffold type '{type}'. Supported: {_SCAFFOLD_TYPES}."
+            )
+        if not dry_run:
+            require_confirmation(confirm, "scaffold_project")
+        project_name = project_name or type
+        main_scene = main_scene or "main"
+        params: dict[str, str | bool] = {
+            "type": type,
+            "project_name": project_name,
+            "main_scene": main_scene,
+            # Forward the destructive gate to the addon: it re-checks confirm
+            # defensively (#409) and would reject the call without it.
+            "confirm": confirm,
+        }
+        if dry_run:
+            # #426: the preview must be the actual plan the real run executes —
+            # directories, settings artifact, autoload script, and root scene —
+            # mirroring the addon handler's steps (project_scaffold.gd), not a
+            # vacuous empty result indistinguishable from a no-op.
+            scene_path = f"res://scenes/{main_scene}.tscn"
+            plan = [
+                "res://scenes/",
+                "res://scripts/",
+                "res://assets/",
+                "res://shaders/",
+                "res://project.godot",
+                "res://scripts/game_state.gd",
+                scene_path,
+            ]
+            return ScaffoldProjectResult(
+                created=False,
+                paths_created=plan,
+                autoloads_registered=["GameState"],
+                dry_run=True,
+            )
+        return ScaffoldProjectResult(**await route(bridge, "cmd_scaffold_project", params))

@@ -1,0 +1,125 @@
+# Making Things fixture / diagnose / C# / trajectory smokes on GitHub-hosted runners
+# (does not require hybridindie self-hosted Godot runners).
+# Full upstream ci.yml / e2e.yml still need [self-hosted, godot] — see docs/making-things/ci-path.md
+name: making-things-smoke
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: mt-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  godot-import-diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Godot 4.7.2 (standard)
+        run: |
+          set -euo pipefail
+          VER=4.7.2-stable
+          curl -fsSL -o /tmp/godot.zip \
+            "https://github.com/godotengine/godot/releases/download/${VER}/Godot_v${VER}_linux.x86_64.zip"
+          sudo unzip -o /tmp/godot.zip -d /usr/local/bin
+          sudo chmod +x /usr/local/bin/Godot_v${VER}_linux.x86_64
+          echo "GODOT_BIN=/usr/local/bin/Godot_v${VER}_linux.x86_64" >> "$GITHUB_ENV"
+
+      - name: Fixture import smoke
+        run: |
+          "$GODOT_BIN" --headless --path fixtures/godot_project --import --quit \
+            --log-file godot-import.log
+
+      - name: Diagnose script smoke
+        run: GODOT_BIN="$GODOT_BIN" bash scripts/diagnose_fixture_smoke.sh
+
+      - name: Upload Godot logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: godot-smoke-logs
+          path: |
+            godot-import.log
+            .godot-smoke-logs/
+
+  python-unit-mt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+      - run: uv sync --frozen
+      - name: Making Things unit + contract (expanded)
+        env:
+          GODOT_MCP_ALLOW_INSECURE_BRIDGE: "1"
+        run: |
+          uv run pytest \
+            tests/unit \
+            tests/contract/test_bridge_auth.py \
+            tests/contract/test_csharp_phase1.py \
+            tests/contract/test_diagnostics_contract.py \
+            tests/integration/test_phase3_eval.py \
+            -q --tb=line
+
+  csharp-mono-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install .NET 8 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Download Godot 4.7.2 mono
+        run: |
+          set -euo pipefail
+          VER=4.7.2-stable
+          curl -fsSL -o /tmp/godot-mono.zip \
+            "https://github.com/godotengine/godot/releases/download/${VER}/Godot_v${VER}_mono_linux_x86_64.zip"
+          sudo unzip -o /tmp/godot-mono.zip -d /usr/local
+          MONO_BIN=$(find /usr/local -type f -name 'Godot_*mono*linux*' | head -1)
+          sudo chmod +x "$MONO_BIN"
+          echo "GODOT_MCP_GODOT_BIN=$MONO_BIN" >> "$GITHUB_ENV"
+          echo "GODOT_MONO_BIN=$MONO_BIN" >> "$GITHUB_ENV"
+      - name: C# fixture smoke
+        run: bash scripts/csharp_fixture_smoke.sh
+      - name: Upload C# smoke logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: csharp-smoke-logs
+          path: .godot-smoke-logs/
+
+  trajectory-harness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+      - run: uv sync --frozen
+      - name: Download Godot 4.7.2 (standard)
+        run: |
+          set -euo pipefail
+          VER=4.7.2-stable
+          curl -fsSL -o /tmp/godot.zip \
+            "https://github.com/godotengine/godot/releases/download/${VER}/Godot_v${VER}_linux.x86_64.zip"
+          sudo unzip -o /tmp/godot.zip -d /usr/local/bin
+          sudo chmod +x /usr/local/bin/Godot_v${VER}_linux.x86_64
+          echo "GODOT_BIN=/usr/local/bin/Godot_v${VER}_linux.x86_64" >> "$GITHUB_ENV"
+      - name: Making Things trajectory harness
+        env:
+          GODOT_MCP_ALLOW_INSECURE_BRIDGE: "1"
+          GODOT_BIN: ${{ env.GODOT_BIN }}
+        run: |
+          # GODOT_BIN set in prior step via GITHUB_ENV
+          export GODOT_BIN="${GODOT_BIN:-/usr/local/bin/Godot_v4.7.2-stable_linux.x86_64}"
+          uv run python -m evals.making_things_trajectory

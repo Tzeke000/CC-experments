@@ -1,0 +1,38 @@
+# NOTICE — Making Things Godot AI stack
+
+This repository (`Tzeke000/CC-experments`) vendors and morphs open-source
+components. Product branding: **Making Things** Godot AI integration.
+
+## Primary base
+
+**Godot Editor MCP** (hybridindie/godot-mcp)
+- Upstream: https://github.com/hybridindie/godot-mcp
+- License: MIT (see `LICENSE` and `godot/addons/godot_mcp/LICENSE`)
+- Copyright: Johnny D / John Doh (see upstream LICENSE)
+- Role: Python FastMCP server (`mcp_server/`), Godot editor addon
+  (`godot/addons/godot_mcp/`), skills, tests, docs
+
+### Making Things morphs (non-exhaustive)
+
+- Bridge auth **required by default** (auto-mint token file); see
+  `mcp_server/config.py` (`GODOT_MCP_BRIDGE_TOKEN`,
+  `GODOT_MCP_ALLOW_INSECURE_BRIDGE`, `~/.config/making-things-godot/bridge.token`)
+- Runtime live property write: `godot_runtime_set_live_property` /
+  `cmd_set_runtime_property` (decision G — runtime-only, honesty fields)
+- Vendored Blender→Godot pipelines under `third_party/`
+- Fixture assets and .NET / C# support docs under `fixtures/` and `docs/`
+- Product README / UPSTREAM provenance for this fork
+
+## Third-party pipelines
+
+See `third_party/README.md`.
+
+| Path | Upstream | License | Notes |
+|------|----------|---------|-------|
+| `third_party/goblend/` | https://github.com/Togira123/Goblend-Export-Addon | GPL-3.0 | Optional Blender+Godot export pipeline; keep separate from MIT code |
+| `third_party/gltf_pipeline/` | https://github.com/zheqd/blender-godot-pipeline (`addons/gltf_pipeline`) | MIT | Godot-side GLTFDocumentExtension for Blender-Godot Pipeline extras; Blender authoring addon is a separate paid product |
+
+## Borrowed patterns (not vendored wholesale)
+
+- hi-godot/godot-ai — localhost capability-token threat model lessons
+- NPGameDev/godot-mcp-toolkit — coverage checklist for tool surface

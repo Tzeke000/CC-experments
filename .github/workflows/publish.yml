@@ -1,0 +1,196 @@
+name: Publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Git tag to publish (e.g. 2026.08.26b1)"
+        required: true
+
+permissions:
+  contents: read
+
+# Publishing builds exactly the tagged commit (`inputs.tag` on a manual dispatch,
+# else the release's `github.ref`) and only after the checks pass (#649). A
+# missing tag fails at checkout. Third-party actions are SHA-pinned; Dependabot
+# (.github/dependabot.yml) keeps them fresh.
+#
+# Godot Asset Store (store.godotengine.org): the addon zip is attached to the
+# GitHub release, then uploaded manually to the store. The beta store's v1 API
+# is read-only for releases (no upload/publish endpoint); see infra/README.md.
+jobs:
+  test:
+    # Release gate: never publish a commit whose tests / lint / types fail.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          version: "0.11.29"
+
+      - name: Zero-skip scan (suite health)
+        run: ./.opencode/hooks/check-no-skipped-tests.sh
+
+      - name: Lint (ruff check)
+        run: uv run ruff check .
+
+      - name: Type check (mypy)
+        run: uv run mypy
+
+      - name: Tests (pytest)
+        run: uv run pytest -q
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write  # upload-artifact
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+        with:
+          # Pinned (issue #579) — skips the flaky manifest fetch (see ci.yml).
+          version: "0.11.29"
+
+      - name: Build package
+        run: uv build
+
+      - name: Build Godot addon zip
+        run: |
+          # Create a zip containing only the addons/godot_mcp/ directory,
+          # structured so it extracts into the project root (addons/godot_mcp/...).
+          # This is the format Godot's Asset Library and manual install expect.
+          # Built into a separate directory (addon_dist/) so it is NOT uploaded to
+          # PyPI — pypa/gh-action-pypi-publish uploads everything in its packages
+          # dir, and the addon zip is not a Python distribution.
+          mkdir -p addon_dist
+          cd godot
+          zip -r ../addon_dist/godot_mcp_addon.zip addons/godot_mcp/
+
+      - name: Upload Python dist artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: dist
+          path: dist/
+
+      - name: Upload Godot addon zip artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: addon_dist
+          path: addon_dist/
+
+  publish-pypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # PyPI trusted publishing (OIDC — no API token needed).
+      actions: read   # download-artifact
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # release/v1
+        with:
+          # Stable releases go to PyPI as-is; if a prerelease (b1, rc1) is ever
+          # cut again, pip install --pre picks those up — PyPI accepts
+          # prerelease versions natively.
+          skip-existing: true
+
+  publish-github:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Attach artifacts to the GitHub release.
+      actions: read   # download-artifact
+    steps:
+      - name: Download Python dist artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: dist
+          path: dist/
+
+      - name: Download Godot addon zip
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: addon_dist
+          path: addon_dist/
+
+      - name: Upload to GitHub release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64  # v3.0.3
+        with:
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+            addon_dist/godot_mcp_addon.zip
+          tag_name: ${{ github.event.release.tag_name || inputs.tag }}
+
+  publish-docker:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write  # Push to ghcr.io
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          # The image must be built from the tagged commit, not the default branch.
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          TAG="${{ github.event.release.tag_name || inputs.tag }}"
+          echo "version=$TAG" >> "$GITHUB_OUTPUT"
+          # Docker tag: lowercase repo, strip dots from version for a clean tag
+          # e.g. 2026.08.26b1 → 2026.08.26b1 (kept as-is, Docker accepts it)
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7
+        with:
+          context: .
+          file: infra/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ steps.version.outputs.tag }}
+            ghcr.io/${{ github.repository }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

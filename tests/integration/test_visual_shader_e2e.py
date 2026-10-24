@@ -1,0 +1,117 @@
+"""End-to-end visual shader test against a live editor (issue #107).
+
+Skipped without Godot.  Creates a visual shader, adds a node, connects it to
+output, and sets a parameter.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import subprocess
+from typing import Any
+
+import pytest
+
+from mcp_server.bridge import Bridge
+from mcp_server.config import BridgeConfig
+from tests.integration._godot import (
+    GODOT_BIN,
+    GODOT_PROJECT,
+    e2e_bridge_url,
+    serve_and_await_editor,
+)
+
+pytestmark = pytest.mark.skipif(GODOT_BIN is None, reason="Godot binary not installed")
+
+# Ephemeral per-run port (issue #444): no fixed port, so a concurrent
+# job's (or an orphaned) editor can never connect to this test's listener.
+BRIDGE_URL = e2e_bridge_url()
+SHADER = "res://tmp_e2e_visual_shader.tres"
+_ARTIFACTS = ["tmp_e2e_visual_shader.tres"]
+
+
+async def _ok(bridge: Bridge, command: str, params: dict[str, Any]) -> dict[str, Any]:
+    response = await bridge.send(command, params)
+    assert response.ok and response.result is not None, (
+        f"{command}: {response.error} {response.hint}"
+    )
+    return response.result
+
+
+async def _run() -> None:
+    bridge = Bridge(BridgeConfig(url=BRIDGE_URL))
+    if not await serve_and_await_editor(bridge):
+        raise AssertionError("the addon never connected to the bridge")
+
+    try:
+        created = await _ok(
+            bridge,
+            "cmd_create_visual_shader",
+            {"name": "e2e", "type": "2d", "path": SHADER},
+        )
+        assert created["created"] is True
+        assert created["path"] == SHADER
+
+        added = await _ok(
+            bridge,
+            "cmd_add_shader_node",
+            {
+                "shader_path": SHADER,
+                "node_type": "VisualShaderNodeColorConstant",
+                "node_id": 2,
+                "position": [100.0, 200.0],
+            },
+        )
+        assert added["added"] is True
+        assert added["node_id"] == 2
+
+        connected = await _ok(
+            bridge,
+            "cmd_connect_shader_nodes",
+            {
+                "shader_path": SHADER,
+                "from_node": 2,
+                "from_port": 0,
+                "to_node": 0,
+                "to_port": 0,
+            },
+        )
+        assert connected["connected"] is True
+
+        # G6 (#219): read the graph back — mode, the added node, and the connection.
+        graph = await _ok(bridge, "cmd_read_visual_shader", {"shader_path": SHADER})
+        assert graph["mode"] == "canvas_item"
+        node1 = next(n for n in graph["nodes"] if n["id"] == 2)
+        assert node1["type"] == "VisualShaderNodeColorConstant"
+        assert node1["position"] == {"x": 100.0, "y": 200.0}
+        assert {"from_node": 2, "from_port": 0, "to_node": 0, "to_port": 0} in graph["connections"]
+
+        types = await _ok(bridge, "cmd_list_shader_node_types", {})
+        assert any(t.startswith("VisualShaderNode") for t in types["types"])
+
+        # validation: not a VisualShader resource path
+        bad = await bridge.send("cmd_read_visual_shader", {"shader_path": "res://nope.tres"})
+        assert bad.ok is False and bad.error == "RESOURCE_NOT_FOUND"
+    finally:
+        await bridge.close()
+
+
+def test_live_visual_shader_workflow() -> None:
+    assert GODOT_BIN is not None
+    editor = subprocess.Popen(
+        [GODOT_BIN, "--headless", "--editor", "--path", str(GODOT_PROJECT)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env={**os.environ, "GODOT_MCP_BRIDGE_URL": BRIDGE_URL},
+    )
+    try:
+        asyncio.run(_run())
+    finally:
+        editor.terminate()
+        try:
+            editor.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            editor.kill()
+        for name in _ARTIFACTS:
+            (GODOT_PROJECT / name).unlink(missing_ok=True)

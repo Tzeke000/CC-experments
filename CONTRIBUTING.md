@@ -1,0 +1,145 @@
+# Contributing to Godot Editor MCP
+
+Thanks for your interest in contributing! Godot Editor MCP (repo: `godot-mcp`) is a standalone MCP server that drives a live Godot editor from AI agents. This guide covers setup, workflow, and conventions.
+
+## Prerequisites
+
+- **Python 3.11+** managed with [uv](https://docs.astral.sh/uv/)
+- **Godot 4.4+** (validated on 4.7-stable)
+- **FastMCP 4.1.0** on **mcp 2.3.0** (stable — MCP SDK v2, the 2026-07-28 sessionless protocol)
+
+## Setup
+
+```bash
+git clone https://github.com/hybridindie/godot-mcp.git
+cd godot-mcp
+uv sync
+```
+
+For the knowledge graph (optional, developers only):
+```bash
+cp .env.dev.example .env
+# Adjust OLLAMA_MODEL to a model you have pulled
+set -a; . ./.env; set +a
+```
+
+## Development commands
+
+```bash
+uv run pytest -q                    # full test suite
+uv run pytest tests/unit/test_smoke.py  # single file
+uv run ruff check .                 # lint
+uv run mypy                         # type check
+./.opencode/hooks/check-no-skipped-tests.sh  # zero-skip suite health gate
+uv run godot-editor-mcp             # start the MCP server (stdio)
+```
+
+## Documentation site
+
+The docs site (https://hybridindie.github.io/godot-mcp/) is a VitePress site in
+`docs/site/` (same tooling and page conventions as the wiki-fabric project).
+It builds via `.github/workflows/deploy-docs.yml` on every push to `main`.
+
+```bash
+cd docs/site
+npm install
+npm run dev                         # live-reload preview at localhost:5173
+npm run build                       # the CI gate — must exit zero
+```
+
+The build also generates **`llms.txt`** (agent-facing page index) and
+**`llms-full.txt`** (the whole site as one markdown document) via
+`docs/site/llms-gen.mjs` — the LLM entry points for the site. Toolset/tool
+counts in prose pages (`reference-toolsets.md` et al.) were generated from
+the live registry — regenerate via the snippet in the PR that added them if
+the surface changes.
+
+## Workflow
+
+Follow the issue-driven pipeline (see `.opencode/rules/workflow.md`):
+
+1. **Issue exists** — every merge traces to a GitHub issue
+2. **Failing test** — write a red test that pins the behavior or reproduces the bug
+3. **Green code** — minimum change to pass
+4. **Preflight clean** — `pytest`, `mypy`, `ruff`, zero-skip scan all green
+5. **PR opened** — title `<type>(<scope>): <summary> (closes #N)`, body has acceptance criteria + test plan
+6. **Comments addressed** — the Qodo PR bot auto-runs `/describe` + `/review`; wait for it, then fix or reply to every finding
+7. **Merge** — squash, delete branch
+
+## Grounding rules
+
+The constitutional rules live in `.opencode/rules/` and are the source of truth for how to build here. Read the relevant rule before writing code in that area:
+
+| Rule | Governs |
+|------|---------|
+| `architecture.md` | Library-first; the addon/server boundary |
+| `mcp-tools.md` | Tool/resource/prompt contract; safety classes |
+| `error-handling.md` | The versioned JSON envelope; structured errors |
+| `async-patterns.md` | Async FastMCP; bridge timeouts, reconnect |
+| `addon.md` | GDScript addon conventions (`@tool`, UndoRedo, serialization) |
+| `testing.md` | TDD mandate; suite health (zero skips) |
+| `workflow.md` | Issue → red test → green → preflight → PR → merge |
+| `enforcement.md` | Gates, PR checklist, versioning |
+
+## Architecture
+
+Two halves joined by a WebSocket bridge:
+
+```
+AI client ──stdio──> FastMCP server (Python) ──WebSocket──> Godot addon (GDScript) ──> live project
+```
+
+- **MCP server** (`mcp_server/`) — owns all safety/permission logic, Pydantic models, and tool schemas. Never touches Godot directly.
+- **Godot addon** (`godot/addons/godot_mcp/`) — the only layer that touches the Godot Editor API. Routes commands to `cmd_*` handlers.
+
+When adding a capability, implement **both** sides: the GDScript `cmd_*` handler and the FastMCP tool that routes to it.
+
+## Safety classes
+
+Every tool is tagged:
+
+| Class | Meaning | Requirements |
+|-------|---------|-------------|
+| `read_only` | Never mutates | None |
+| `mutating` | Reversible (UndoRedo) | `dry_run: bool = False` |
+| `destructive` | May be irreversible | `dry_run` + `confirm: bool = True` |
+| `runtime` | Controls game execution | — |
+
+## Testing
+
+TDD is mandated (see `.opencode/rules/testing.md`):
+
+- **Contract** — envelope shapes and tool schemas (`tests/contract/`)
+- **Integration** — server ↔ fake bridge; precondition and safety paths (`tests/integration/`)
+- **Unit** — isolated logic, models, helpers (`tests/unit/`)
+- **GDScript** — GUT tests for addon behavior (`godot/tests/`, `examples/*/tests/`)
+
+Zero skips are a blocking gate. No `@pytest.mark.skip`, no `xfail`, no bare `pytest.skip()`.
+
+## Skills
+
+Three AI skills ship in `skills/` — copy them into any AI client's skill directory:
+
+```bash
+git clone --depth 1 https://github.com/hybridindie/godot-mcp /tmp/godot-mcp
+cp -r /tmp/godot-mcp/skills/* ~/.config/opencode/skills/   # Claude: ~/.claude/skills/
+```
+
+Copy the whole `godot-expert/` folder — including `references/`. See
+[`skills/README.md`](skills/README.md) for details.
+
+## Versioning
+
+CalVer `YYYY.MM.DD[.N]` (stable, e.g. `2026.09.10`); a dotted `.N` is a same-day revision (e.g. `2026.10.20.1`); prerelease suffixes (`b1`, `rc1`) only when cutting a beta. The version is in `pyproject.toml`, `mcp_server/__init__.py`, `godot/addons/godot_mcp/plugin.cfg`, and the version references in `skills/godot-getting-started/SKILL.md` — all must stay in lockstep (the drift tests enforce it).
+
+## Publishing
+
+Releases are automated via `.github/workflows/publish.yml` — triggered on GitHub release publish. See [the release workflow](infra/README.md) for details.
+
+The addon zip is attached to the GitHub release and must be uploaded to the new
+Godot Asset Store manually for now: its beta v1 API is read-only for releases and
+has no publish endpoint. See [the Asset Store notes](infra/README.md#godot-asset-store).
+
+## Questions?
+
+Open an [issue](https://github.com/hybridindie/godot-mcp/issues) or read [`AGENTS.md`](AGENTS.md) for the full project context.

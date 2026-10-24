@@ -1,0 +1,160 @@
+"""Particle tools (issue #42).
+
+Create and configure GPU particle systems over the bridge: the node + its
+ParticleProcessMaterial, a color-over-lifetime gradient, and named VFX presets.
+Gated `particles` toolset; all `mutating` (UndoRedo-wrapped addon-side) with
+`dry_run`. Generic Godot — pass the node type names (``GPUParticles2D`` /
+``GPUParticles3D``).
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from fastmcp import FastMCP
+
+from mcp_server.bridge import Bridge
+from mcp_server.categories import PARTICLES_TAG
+from mcp_server.constraints import ParticleAmount
+from mcp_server.defaults import (
+    DEFAULT_PARTICLE_AMOUNT,
+    DEFAULT_PARTICLE_LIFETIME,
+)
+from mcp_server.models.particles import (
+    CreateParticlesResult,
+    ParticleGradientResult,
+    ParticleMaterialDetail,
+    ParticleMaterialResult,
+    ParticlePresetResult,
+)
+from mcp_server.safety import MUTATING, READ_ONLY, enforce_preconditions, require_node_exists
+from mcp_server.tools._persistence import node_probe
+from mcp_server.tools._route import route, run_or_preview
+
+PARTICLES = {PARTICLES_TAG}
+
+# Generic VFX presets recognized by the addon (no game vocabulary).
+PARTICLE_PRESETS = ("fire", "smoke", "explosion", "sparks")
+
+
+def register_particles(mcp: FastMCP, bridge: Bridge) -> None:
+    """Register the particle tools."""
+
+    @mcp.tool(meta=MUTATING, tags=PARTICLES)
+    @enforce_preconditions
+    async def create_particles(
+        parent_path: str,
+        particles_type: str = "GPUParticles2D",
+        name: str = "",
+        amount: ParticleAmount = DEFAULT_PARTICLE_AMOUNT,
+        lifetime: float = DEFAULT_PARTICLE_LIFETIME,
+        properties: dict[str, Any] | None = None,
+        dry_run: bool = False,
+    ) -> CreateParticlesResult:
+        """Add a GPU particle node (GPUParticles2D / GPUParticles3D) under
+        ``parent_path`` with a fresh ParticleProcessMaterial. ``amount``/``lifetime``
+        and any node ``properties`` (e.g. ``one_shot``, ``explosiveness``) are applied.
+        """
+        await require_node_exists(bridge, parent_path)
+        params = {
+            "parent_path": parent_path,
+            "particles_type": particles_type,
+            "name": name or particles_type,
+            "amount": amount,
+            "lifetime": lifetime,
+            "properties": properties or {},
+        }
+        preview = {"node_path": "", "particles_type": particles_type, "created": False}
+        return await run_or_preview(
+            dry_run,
+            CreateParticlesResult,
+            preview,
+            bridge,
+            "cmd_create_particles",
+            params,
+            persistence_probe=node_probe(parent_path, probe_parent=True),
+        )
+
+    @mcp.tool(meta=MUTATING, tags=PARTICLES)
+    @enforce_preconditions
+    async def set_particle_material(
+        node_path: str, properties: dict[str, Any], dry_run: bool = False
+    ) -> ParticleMaterialResult:
+        """Configure the ParticleProcessMaterial of the particle node at ``node_path``
+        (creating one if absent): set ``properties`` such as ``gravity``,
+        ``initial_velocity_min``/``max``, ``scale_min``/``max``, ``spread``, ``color``.
+        """
+        await require_node_exists(bridge, node_path)
+        params = {"node_path": node_path, "properties": properties}
+        preview = {"node_path": node_path, "properties": {}}
+        return await run_or_preview(
+            dry_run,
+            ParticleMaterialResult,
+            preview,
+            bridge,
+            "cmd_set_particle_material",
+            params,
+            persistence_probe=node_probe(node_path, ["process_material"]),
+        )
+
+    @mcp.tool(meta=MUTATING, tags=PARTICLES)
+    @enforce_preconditions
+    async def set_particle_color_gradient(
+        node_path: str,
+        colors: list[Any],
+        offsets: list[float] | None = None,
+        dry_run: bool = False,
+    ) -> ParticleGradientResult:
+        """Set the color-over-lifetime ramp on the particle node's process material:
+        ``colors`` is a list of color stops (HTML strings like "#ff8800" or
+        ``[r,g,b,a]``); ``offsets`` are 0..1 positions (defaults to evenly spaced).
+        Builds a GradientTexture1D and assigns it to ``color_ramp``.
+        """
+        await require_node_exists(bridge, node_path)
+        params: dict[str, Any] = {"node_path": node_path, "colors": colors}
+        if offsets is not None:
+            params["offsets"] = offsets
+        preview = {"node_path": node_path, "stops": len(colors)}
+        return await run_or_preview(
+            dry_run,
+            ParticleGradientResult,
+            preview,
+            bridge,
+            "cmd_set_particle_color_gradient",
+            params,
+        persistence_probe=node_probe(node_path, ["process_material"]),
+        )
+
+    @mcp.tool(meta=MUTATING, tags=PARTICLES)
+    @enforce_preconditions
+    async def apply_particle_preset(
+        node_path: str, preset: str, dry_run: bool = False
+    ) -> ParticlePresetResult:
+        """Apply a generic VFX preset to the particle node at ``node_path`` — one of
+        fire / smoke / explosion / sparks. Configures the node + process material +
+        color ramp in one call as a starting point you can then tweak.
+        """
+        await require_node_exists(bridge, node_path)
+        params = {"node_path": node_path, "preset": preset}
+        preview = {"node_path": node_path, "preset": preset}
+        return await run_or_preview(
+            dry_run,
+            ParticlePresetResult,
+            preview,
+            bridge,
+            "cmd_apply_particle_preset",
+            params,
+            persistence_probe=node_probe(node_path),
+        )
+
+    @mcp.tool(meta=READ_ONLY, tags=PARTICLES)
+    async def get_particle_material(node_path: str) -> ParticleMaterialDetail:
+        """Read the ProcessMaterial of the GPUParticles2D/3D at ``node_path``: its
+        ``properties`` (JSON-coerced material fields) and ``color_ramp`` (gradient stops,
+        null when none). ``has_material`` is false when no ProcessMaterial is set. The
+        inverse of ``set_particle_material`` / ``set_particle_color_gradient`` — snapshot
+        a material before editing it for rollback.
+        """
+        return ParticleMaterialDetail(
+            **await route(bridge, "cmd_get_particle_material", {"node_path": node_path})
+        )

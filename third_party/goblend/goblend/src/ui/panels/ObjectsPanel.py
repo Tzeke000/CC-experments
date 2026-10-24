@@ -1,0 +1,100 @@
+# ObjectsPanel.py
+#
+# Copyright (C) 2026-present Goblend contributers, see https://github.com/Togira123/Goblend-Export-Addon
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>
+
+
+from typing import cast
+
+from ...types.goblend_types import GoblendContext
+
+import bpy
+
+
+class SCENE_PT_ObjectsPanel(bpy.types.Panel):
+    bl_parent_id = "SCENE_PT_export_to_godot"
+    bl_label = "Objects"
+    bl_space_type = "PROPERTIES"
+    bl_region_type = "WINDOW"
+    bl_context = "scene"
+
+    def draw(self, context: bpy.types.Context) -> None:
+        layout = self.layout
+
+        if not layout:
+            return
+
+        scene = cast(GoblendContext, context).scene
+
+        object_panel_props = scene.object_panel_props
+
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        for item in object_panel_props:
+            header, panel = layout.panel_prop(item, "open")
+
+            # panel header
+            split = header.split()
+
+            col = split.column()
+            obj_name = item.obj.name if item.obj else "No Object"
+            col.label(text=obj_name)
+
+            row = split.row()
+            row.alignment = "RIGHT"
+            row.prop(item, "enabled", text="")
+            row.separator(factor=3.0, type="SPACE")
+            row.context_pointer_set(name="object_setting_to_remove", data=item.obj)
+            row.operator("scene.remove_object_setting", text="", icon="X", emboss=False)
+
+            # panel body
+            if panel:
+                panel.use_property_split = True
+                panel.enabled = item.enabled
+                col = panel.column()
+                col.prop(item, "obj")
+                col.prop(item, "uv_map_enabled")
+                if item.uv_map_enabled:
+                    col.prop(item, "uv_map_per_texture_enabled")
+                    if item.uv_map_per_texture_enabled:
+                        col.prop(item, "uv_map_base_color")
+                        col.prop(item, "uv_map_metallic_roughness")
+                        col.prop(item, "uv_map_normal")
+                    else:
+                        col.prop(item, "uv_map")
+                col.prop(item, "shadow_cast_mode")
+
+                col.prop(item, "render_layers_override_enabled")
+                if item.render_layers_override_enabled:
+                    render_layers_override_header, render_layers_override_panel = panel.panel_prop(
+                        item, "render_layers_override_panel_open"
+                    )
+                    render_layers_override_header.label(text="Render Layer Overrides")
+                    if render_layers_override_panel:
+                        row = render_layers_override_panel.row()
+                        row.template_list(
+                            "SCENE_UL_RenderLayersList",
+                            "render_layers_list",
+                            item,
+                            "render_layers_override_list",
+                            item,
+                            "render_layers_list_index",
+                        )
+
+                        inner_col = row.column(align=True)
+                        inner_col.context_pointer_set(name="list", data=item)
+                        inner_col.operator("render_layers_list.add_item", icon="ADD", text="")
+                        inner_col.operator("render_layers_list.remove_item", icon="REMOVE", text="")

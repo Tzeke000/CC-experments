@@ -1,0 +1,74 @@
+---
+type: index
+title: "Errors & recovery"
+description: "The stable error-code enum and the recovery table — every failure names its fix."
+created: 2026-09-19
+updated: 2026-09-23
+---
+
+# Errors & recovery
+
+Errors are structured data an agent can act on. Never a stack trace, never
+silent, and every failure names a fix.
+
+## The error-code enum
+
+The eight bridge-envelope codes (the `ErrorCode` enum in
+`mcp_server/models/envelope.py` — what the addon can emit):
+
+| Code | Meaning | Typical cause |
+|------|---------|---------------|
+| `PRECONDITION_FAILED` | a required state is missing | no scene open, missing `confirm`, toolset version gate |
+| `RESOURCE_NOT_FOUND` | a node/scene/script/resource path does not exist | typo'd path; use `get_scene_tree` / `get_filesystem_tree` first |
+| `VALIDATION_ERROR` | parameters are malformed or refused | unknown ProjectSettings key, dimension mismatch, bad enum value |
+| `BRIDGE_DISCONNECTED` | Godot is not reachable | editor closed / addon disabled / bridge URL wrong |
+| `TIMEOUT` | the request outlived its timeout (may carry a readiness `reason`) | a capture that never landed; a stalled editor |
+| `INTERNAL_ERROR` | a handler failed without producing a response | a GDScript error inside the addon (see the editor's Output panel) |
+| `APPROVAL_DENIED` | the human declined an approval | n/a — retry with different intent |
+| `PEER_REPLACED` | a server **notice** to the editor that a second editor took over the bridge (not a tool failure) | two editors pointed at one server; the replaced dock shows purple and stops reconnecting (#593) |
+
+Four server-side codes appear in `ToolError` text but never cross the bridge
+(the server rejects before dispatching, or bounds the payload locally):
+
+| Code | Meaning | Typical cause |
+|------|---------|---------------|
+| `PARAM_ERROR` | a path parameter rejected server-side before the bridge call | a script/resource path that isn't `res://`-contained (`res://../…`, `res:///abs`) |
+| `OUTPUT_LIMIT` | a result payload would exceed the 25k character cap | an oversized `snapshot_subtree` — narrow with `max_depth` |
+| `UNDECLARED_PARAMETER` | an argument the tool does not declare (#757) | the `hint` lists the accepted names; `next_call` renames a near-miss |
+| `CONSENT_MISMATCH` | a destructive call’s consent token is missing, expired, replayed, or bound to different args (#759) | call `godot_describe_tool` with the exact args, then pass its `token` as `consent` |
+
+## The recovery table
+
+| Error / symptom | Fix |
+|-----------------|-----|
+| `unknown tool` | the toolset isn't enabled → `godot_enable_toolset(...)`; or you mixed a server-side tool with an editor tool |
+| `[required=active_scene]` | `godot_scene_edit_open_scene(path)` or `create_scene` |
+| `[required=confirm]` | destructive call → `dry_run` first, then `confirm=True` (or `consent` when approval is configured) |
+| `[required=consent]` | call `godot_describe_tool(tool, args)` and pass its `token` as `consent` |
+| `[required=bridge_connected]` | open Godot with the addon; check the status dock |
+| `[required=runtime_probe]` | register `MCPRuntimeProbe` as an autoload |
+| `[required=game_not_breaked]` | the game is frozen at a debugger break → `godot_debugger_continue_execution` |
+| `[required=godot_version]` | the toolset needs Godot 4.4+ → upgrade the editor |
+| `VALIDATION_ERROR: Unknown ProjectSettings key … did you mean …` | use the suggested key (e.g. `application/run/main_scene`, not `application/config/main_scene`) |
+| `persisted: false` + `hint` | act on the hint (e.g. `godot_scene_edit_set_editable_children`) or retarget |
+| `rescan_pending: true` | re-run the parse check once; the editor's scan hadn't flushed |
+| `NON-ZERO EXIT` on a real crash | read `errors[]` from the run; fix and re-verify |
+| `RUN TIMED OUT` | if the game never self-quits, pass `expected_timeout=true` to `godot_debug_workflow` |
+
+## Design rules
+
+1. **Failures are data.** `{ok: false, error, hint}` crosses the envelope;
+   the server shapes the same structure into a `ToolError` for the client.
+2. **`hint` is for recovery** — written for an agent with no human in the
+   loop. A hint that restates the code is a bug.
+3. **Preconditions carry `required`** — the machine-checkable name of what to
+   satisfy. Errors may also carry `next_call` (a fully-formed follow-up call) in
+   the result's `structuredContent` so recovery is executable, not prose (#757).
+4. **No partial success.** A result never reads as success when the effect
+   half-failed: `aborted_at`, `undoable`, `persisted`, and `rescan_pending`
+   exist so the agent never has to guess.
+5. **No invented codes.** Clients match on the enum; a new code is an additive
+   contract change.
+
+The envelope-level rules are pinned by contract tests against a fake addon
+peer — a shape change without a contract-test update is a drift bug.

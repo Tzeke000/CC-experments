@@ -1,0 +1,553 @@
+"""Toolset gating: category tags + dynamic enable/disable (issue #26).
+
+A large flat tool surface degrades agent tool-selection and burns context, so we
+keep the *live* surface small. Every tool carries a category tag; `core` is always
+on; other categories ship gated off and the agent turns them on with
+`enable_toolset`. As the catalog grows toward full Godot coverage, the exposed set
+stays small. Built on FastMCP's tag-based `enable`/`disable`. After mutating the
+enabled set, ``enable_toolset`` / ``disable_toolset`` emit a
+``notifications/tools/list_changed`` so clients refresh their cached tool registry
+(issue #485).
+
+Some toolsets require a minimum Godot version because they rely on editor APIs
+added in later releases (e.g. ``input_map`` needs Godot 4.4+).
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import re
+from typing import TYPE_CHECKING, Any
+
+from fastmcp import Context, FastMCP
+from fastmcp.exceptions import ToolError
+from fastmcp.server.providers.base import Provider
+from mcp_types import ToolListChangedNotification
+from pydantic import BaseModel, Field
+
+if TYPE_CHECKING:
+    from mcp_server.subscriptions import ToolsetSubscriptionHub
+
+from mcp_server.bridge import Bridge
+from mcp_server.categories import (
+    ANALYSIS_TAG,
+    ANIMATION_TAG,
+    ASSET_IMPORT_TAG,
+    AUDIO_TAG,
+    BATCH_TAG,
+    COMPOSITE_TAG,
+    CORE_TAG,
+    DEBUGGER_TAG,
+    EDITOR_TAG,
+    EXPORT_TAG,
+    INPUT_MAP_TAG,
+    INPUT_TAG,
+    INSPECTION_TAG,
+    NAVIGATION_TAG,
+    PARTICLES_TAG,
+    PHYSICS_TAG,
+    PROFILING_TAG,
+    PROJECT_SCAFFOLD_TAG,
+    PROJECT_TAG,
+    RESOURCES_EDIT_TAG,
+    RUNTIME_TAG,
+    SCENE_3D_TAG,
+    SCENE_EDIT_TAG,
+    SCRIPTS_TAG,
+    SHADER_TAG,
+    TESTING_TAG,
+    THEME_UI_TAG,
+    TILEMAP_TAG,
+    VISUAL_SHADER_TAG,
+)
+from mcp_server.safety import READ_ONLY
+from mcp_server.toolset_middleware import ToolsetMiddleware
+
+logger = logging.getLogger(__name__)
+
+# Toggleable toolsets (category → agent-facing description). `core` is not here.
+TOOLSETS: dict[str, str] = {
+    INSPECTION_TAG: "Read-only project, scene, and node inspection.",
+    SCENE_EDIT_TAG: "Create, modify, and delete nodes, scripts, signals, and scenes "
+    "(mutating + destructive).",
+    RUNTIME_TAG: "Run the project headless and capture its output/errors.",
+    SCRIPTS_TAG: "Read, write, and patch GDScript files; check for parse errors.",
+    RESOURCES_EDIT_TAG: "Read/create/edit resource (.tres) files and register autoloads.",
+    PROJECT_TAG: "Explore the filesystem, search files, read/write project settings, resolve UIDs.",
+    EDITOR_TAG: "Capture editor screenshots (image content for vision-capable clients).",
+    PHYSICS_TAG: "Configure physics bodies, collision shapes, layers/masks, and raycasts.",
+    ANIMATION_TAG: "Author animations (tracks/keyframes) and AnimationTree "
+    "state machines/blend trees.",
+    SCENE_3D_TAG: "Build 3D scenes: mesh instances, cameras, lights, "
+    "WorldEnvironment, and GridMap cells.",
+    PARTICLES_TAG: "Create/configure GPU particle systems: process material, "
+    "color gradients, and VFX presets.",
+    NAVIGATION_TAG: "Author navigation: regions, agents, navmesh baking, and "
+    "navigation layers.",
+    AUDIO_TAG: "Set up audio: stream players, audio bus layout, and bus effects.",
+    TILEMAP_TAG: "Edit TileMap/TileMapLayer cells: set, fill rect, get, clear, "
+    "list layers.",
+    THEME_UI_TAG: "Create themes and override colors, font sizes, and styleboxes "
+    "on Control nodes.",
+    SHADER_TAG: "Author shaders: create/read shader files, assign ShaderMaterial, "
+    "set shader parameters.",
+    INPUT_MAP_TAG: "Edit the project's Input Map actions and events (add/remove/clear).",
+    INPUT_TAG: "Drive a running game: synthesize key/mouse/action input and play "
+    "input sequences (needs a play session + runtime probe).",
+    TESTING_TAG: "Automated play-testing: run scenarios, assert live node state, "
+    "diff screenshots, and fuzz with random input.",
+    PROFILING_TAG: "Read Godot performance monitors (FPS, draw calls, memory, "
+    "physics) for the editor or a running game.",
+    BATCH_TAG: "Operate over many nodes/scenes: find by type, batch-set a property, "
+    "cross-scene edits, and dependency analysis.",
+    ANALYSIS_TAG: "Static project analysis: unused resources, signal flow, circular "
+    "script dependencies, and scene-complexity stats.",
+    EXPORT_TAG: "Drive the export pipeline: list presets, report export info, and run "
+    "an export (needs export templates).",
+    DEBUGGER_TAG: "Debugger breakpoint control: set, remove, clear breakpoints and force "
+    "breaks in a running game (needs a play session).",
+    ASSET_IMPORT_TAG: "Import external assets (local files or URLs) into the project and "
+    "assemble PBR materials from textures.",
+    VISUAL_SHADER_TAG: "Create and edit Visual Shader node graphs: create shaders, add "
+    "nodes, wire connections, and set node parameters.",
+    PROJECT_SCAFFOLD_TAG: "Generate a project skeleton (directories, settings, autoloads, "
+    "root scene) for common game types so agents start from a known structure.",
+    COMPOSITE_TAG: "Macro tools that collapse multi-step scene edits into one atomic, "
+    "single-undo round-trip (compose a node with script/children, batch-create nodes, "
+    "apply many edits at once). Individual scene_edit tools still work.",
+}
+
+# Minimum Godot version (major, minor) per toolset. Categories omitted here work
+# on every supported version (currently 4.4+).
+TOOLSET_MIN_GODOT: dict[str, tuple[int, int]] = {
+    # scene_edit contains scene_session (#79) and instance_scene (#80).
+    # EditorInterface.open_scene_from_path / reload_scene_from_path /
+    # save_all_scenes / select_nodes exist since 4.2, and PackedScene.instantiate()
+    # (replacing instance()) is 4.0+. So scene_edit itself is broadly compatible.
+    # We gate at 4.4 because the addon is only tested/validated against 4.4+.
+    SCENE_EDIT_TAG: (4, 4),
+    # input_map (#81) edits ProjectSettings input/ entries at runtime.
+    # ProjectSettings.set_setting / save / has_setting exist in 4.2+,
+    # but we test on 4.4+. Same rationale as scene_edit.
+    INPUT_MAP_TAG: (4, 4),
+    # TileSet authoring (#82) uses TileSetSource/AtlasSource APIs that changed
+    # significantly in 4.2+. We only validate against 4.4+.
+    TILEMAP_TAG: (4, 4),
+    # MeshLibrary authoring (#83) creates MeshLibrary resources via the
+    # ResourceSaver API; stable from 4.2+ but validated on 4.4+.
+    SCENE_3D_TAG: (4, 4),
+    # Everything else (inspection, scripts, resources, project, physics,
+    # animation, audio, theme, shader, input_sim, runtime, testing, profiling,
+    # batch, analysis, export, editor) either uses very stable APIs or has been
+    # present since 4.2+. We leave them un-gated so the agent can try them;
+    # the addon will produce a structured error if an API is missing.
+}
+
+# Enabled at startup (plus `core`, which is always on). Everything else is gated
+# off until the agent enables it — keeping the default surface small and read-only.
+# Override with GODOT_MCP_DEFAULT_TOOLSETS: comma-separated categories, or "all"
+# to expose the full catalog at startup. The toolset-protocol instructions text
+# (mcp_server/toolset_protocol.py) derives its wording from this value so the
+# agent-facing "what is enabled" claim always matches the live surface (#425).
+def _default_enabled_from_env() -> frozenset[str]:
+    raw = os.environ.get("GODOT_MCP_DEFAULT_TOOLSETS", "").strip()
+    if raw.lower() == "all":
+        return frozenset(TOOLSETS)
+    wanted = {t.strip() for t in raw.split(",") if t.strip()}
+    valid = wanted & set(TOOLSETS)
+    ignored = wanted - valid
+    if ignored:
+        logger.warning(
+            "GODOT_MCP_DEFAULT_TOOLSETS: ignoring unknown toolset names: %s "
+            "(valid: %s)",
+            ", ".join(sorted(ignored)),
+            ", ".join(sorted(TOOLSETS)),
+        )
+    return frozenset(valid) if valid else frozenset({INSPECTION_TAG})
+
+
+DEFAULT_ENABLED: frozenset[str] = _default_enabled_from_env()
+
+
+# Named bundles (issue #653): a curated set of toolsets for a common workflow, so
+# an agent enables a whole phase in ONE call instead of one per category. Bundles
+# are just presets over TOOLSETS — not a new gating unit — and are game-agnostic
+# (they describe editor workflows, no game vocabulary). Expand with
+# ``enable_toolsets(["author", "playtest"])``.
+BUNDLES: dict[str, tuple[str, ...]] = {
+    # Build + edit a scene and its assets.
+    "author": (
+        SCENE_EDIT_TAG,
+        SCRIPTS_TAG,
+        RESOURCES_EDIT_TAG,
+        PROJECT_TAG,
+        SHADER_TAG,
+        VISUAL_SHADER_TAG,
+        THEME_UI_TAG,
+        TILEMAP_TAG,
+        SCENE_3D_TAG,
+        PARTICLES_TAG,
+        PHYSICS_TAG,
+        ANIMATION_TAG,
+        NAVIGATION_TAG,
+        AUDIO_TAG,
+    ),
+    # Run, drive, and observe the game.
+    "playtest": (
+        RUNTIME_TAG,
+        INPUT_TAG,
+        INPUT_MAP_TAG,
+        TESTING_TAG,
+        DEBUGGER_TAG,
+        PROFILING_TAG,
+    ),
+    # Package and ship.
+    "ship": (EXPORT_TAG, PROJECT_SCAFFOLD_TAG),
+}
+
+
+class ToolSummary(BaseModel):
+    """One exposed tool's identity + input schema (issue #621)."""
+
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+
+
+class ToolsetInfo(BaseModel):
+    """One toolset's current exposure state."""
+
+    name: str
+    enabled: bool
+    description: str
+    min_godot: str | None = None  # Minimum Godot version required, or None if un-gated.
+    # Populated by ``enable_toolset`` (issue #621): the exposed tools this toggle
+    # revealed, so an agent on a client that never refreshes its cached registry
+    # can act on them directly. Empty for ``list_toolsets`` / ``disable_toolset``.
+    tools: list[ToolSummary] = Field(default_factory=list)
+
+
+class ToolsetManager:
+    """Tracks which toolsets are exposed (issue #227 / #364).
+
+    The enabled set is server-global via :class:`ToolsetMiddleware`; this class
+    handles version checks and toolset metadata. The ``enable``/``disable``
+    methods read/write the global set through the middleware.
+    """
+
+    def __init__(
+        self,
+        mcp: FastMCP,
+        bridge: Bridge | None = None,
+        default_enabled: frozenset[str] = DEFAULT_ENABLED,
+        middleware: ToolsetMiddleware | None = None,
+    ) -> None:
+        self._mcp = mcp
+        self._bridge = bridge
+        self._default_enabled: set[str] = {CORE_TAG} | set(default_enabled)
+        self._godot_version: tuple[int, int] | None = None
+        self._middleware = middleware
+
+    async def enable(self, category: str, *, ctx: Any = None) -> ToolsetInfo:
+        self._check_toggleable(category)
+        await self._require_godot_version(category)
+        if self._middleware is not None:
+            enabled = self._middleware.enabled()
+            enabled.add(category)
+            self._middleware.set_enabled(enabled)
+        info = self._info(category)
+        # #621: make the enable result self-sufficient — carry the enabled tools'
+        # schemas so an agent whose client never refreshes its registry can act now.
+        info.tools = await self._tool_summaries(category)
+        return info
+
+    async def disable(self, category: str, *, ctx: Any = None) -> ToolsetInfo:
+        self._check_toggleable(category)
+        if self._middleware is not None:
+            enabled = self._middleware.enabled()
+            enabled.discard(category)
+            self._middleware.set_enabled(enabled)
+        return self._info(category)
+
+    def _expand(self, names: list[str]) -> list[str]:
+        """Expand bundle names + individual toolsets to a deduped, ordered list.
+
+        Accepts a bare toolset, ``core`` (rejected later by the toggle check), or a
+        bundle name. Raises a structured ``ToolError`` on a miss.
+        """
+        out: list[str] = []
+        for name in names:
+            members = BUNDLES.get(name)
+            if members is not None:
+                for member in members:
+                    if member not in out:
+                        out.append(member)
+                continue
+            if name != CORE_TAG and name not in TOOLSETS:
+                known = ", ".join(sorted(set(TOOLSETS) | set(BUNDLES)))
+                raise ToolError(f"Unknown toolset or bundle '{name}'. Available: {known}.")
+            if name not in out:
+                out.append(name)
+        return out
+
+    async def enable_many(self, names: list[str], *, ctx: Any = None) -> ToolsetInfo:
+        """Enable every toolset named (or in every bundle named) in one call (#653).
+
+        A single name keeps the exact per-toolset result; multiple names return one
+        combined ``ToolsetInfo`` whose ``tools`` carries every enabled member tool's
+        schema, so one call replaces N ``enable_toolset`` calls.
+        """
+        expanded = self._expand(names)
+        if len(expanded) == 1:
+            return await self.enable(expanded[0], ctx=ctx)
+        for category in expanded:
+            self._check_toggleable(category)
+            await self._require_godot_version(category)
+        if self._middleware is not None:
+            enabled = self._middleware.enabled()
+            enabled.update(expanded)
+            self._middleware.set_enabled(enabled)
+        tools: list[ToolSummary] = []
+        for category in expanded:
+            tools.extend(await self._tool_summaries(category))
+        return ToolsetInfo(
+            name=",".join(expanded),
+            enabled=True,
+            description=f"{len(expanded)} toolsets enabled.",
+            tools=tools,
+        )
+
+    async def disable_many(self, names: list[str], *, ctx: Any = None) -> ToolsetInfo:
+        """Disable every toolset named (or in every bundle named) in one call (#653)."""
+        expanded = self._expand(names)
+        if len(expanded) == 1:
+            return await self.disable(expanded[0], ctx=ctx)
+        for category in expanded:
+            self._check_toggleable(category)
+        if self._middleware is not None:
+            enabled = self._middleware.enabled()
+            enabled.difference_update(expanded)
+            self._middleware.set_enabled(enabled)
+        return ToolsetInfo(
+            name=",".join(expanded),
+            enabled=False,
+            description=f"{len(expanded)} toolsets disabled.",
+        )
+
+    async def push_enabled(self) -> None:
+        """Push the current enabled-toolset set to the addon's dock (issue #592).
+
+        Fire-and-forget best-effort: the dock's ``Toolsets:`` row was dead code
+        (it always read ``(none)`` because the addon has no view of the
+        server-side gating). The server owns toolset state, so it tells the
+        addon — on peer connect and after every enable/disable. An old addon
+        without ``cmd_toolsets_update`` ignores the push (Unknown command); a
+        disconnected editor is skipped. Never raises.
+
+        Uses ``Bridge.notify`` (#624), not a correlated ``send``: the push is
+        cosmetic, so a silent or slow peer must not stall the toggle waiting on a
+        reply that only feeds the dock.
+        """
+        bridge = self._bridge
+        if bridge is None or not bridge.connected:
+            return
+        try:
+            await bridge.notify("cmd_toolsets_update", {"enabled": sorted(self._enabled_set())})
+        except Exception:
+            logger.warning("toolset push to addon failed (dock row may be stale)", exc_info=True)
+
+    async def _tool_summaries(self, category: str) -> list[ToolSummary]:
+        """Exposed tools for ``category`` — transformed names + input schema (#621).
+
+        ``Provider.list_tools`` applies the ``godot_`` naming transform, so the
+        names match what a client would call. Best-effort: the toggle already
+        succeeded, so a listing failure yields an empty list, never a failed call.
+        """
+        try:
+            tools = await Provider.list_tools(self._mcp)
+        except Exception:
+            logger.warning("could not list tools for toolset %r (#621)", category, exc_info=True)
+            return []
+        return [
+            ToolSummary(
+                name=tool.name,
+                description=tool.description or "",
+                input_schema=dict(tool.parameters or {}),
+            )
+            for tool in tools
+            if category in getattr(tool, "tags", set())
+        ]
+
+    def _enabled_set(self) -> set[str]:
+        if self._middleware is not None:
+            return self._middleware.enabled()
+        return set(self._default_enabled)
+
+    def status(self, *, ctx: Any = None) -> list[ToolsetInfo]:
+        if self._middleware is not None:
+            enabled = self._middleware.enabled()
+        else:
+            enabled = set(self._default_enabled)
+        core = ToolsetInfo(
+            name=CORE_TAG,
+            enabled=True,
+            description="Always-on diagnostics and toolset management.",
+            min_godot=None,
+        )
+        return [core, *(self._info(c, enabled) for c in TOOLSETS)]
+
+    def _info(self, category: str, enabled: set[str] | None = None) -> ToolsetInfo:
+        if enabled is None:
+            if self._middleware is not None:
+                enabled = self._middleware.enabled()
+            else:
+                enabled = set(self._default_enabled)
+        req = TOOLSET_MIN_GODOT.get(category)
+        return ToolsetInfo(
+            name=category,
+            enabled=category in enabled,
+            description=TOOLSETS[category],
+            min_godot=f"{req[0]}.{req[1]}" if req else None,
+        )
+
+    def _check_toggleable(self, category: str) -> None:
+        if category == CORE_TAG:
+            raise ToolError("The 'core' toolset is always enabled and cannot be toggled.")
+        if category not in TOOLSETS:
+            known = ", ".join(TOOLSETS)
+            raise ToolError(f"Unknown toolset '{category}'. Available: {known}.")
+
+    async def _require_godot_version(self, category: str) -> None:
+        """Fail enable() if the connected Godot editor is older than the toolset's
+        minimum supported version. The version is lazily queried from the bridge
+        once and cached.
+        """
+        req = TOOLSET_MIN_GODOT.get(category)
+        if req is None:
+            return
+        if self._bridge is None or not self._bridge.connected:
+            raise ToolError(
+                f"BRIDGE_DISCONNECTED: Toolset '{category}' requires Godot {req[0]}.{req[1]}+, "
+                "but the Godot bridge is not connected. Start the editor with the addon "
+                "enabled and retry. [required=bridge_connected]"
+            )
+        if self._godot_version is None:
+            self._godot_version = await self._fetch_godot_version()
+        if self._godot_version is None:
+            raise ToolError(
+                f"PRECONDITION_FAILED: Toolset '{category}' requires Godot {req[0]}.{req[1]}+, "
+                "but the Godot version could not be determined. Check the editor and addon "
+                "status, then retry. [required=bridge_connected]"
+            )
+        if self._godot_version < req:
+            raise ToolError(
+                f"PRECONDITION_FAILED: Toolset '{category}' requires Godot "
+                f"{req[0]}.{req[1]}+ (connected editor is "
+                f"{self._godot_version[0]}.{self._godot_version[1]}). "
+                "Upgrade the editor or enable a different toolset. "
+                "[required=godot_version]"
+            )
+
+    async def _fetch_godot_version(self) -> tuple[int, int] | None:
+        """Query the addon for Godot version info and parse (major, minor).
+
+        Returns ``None`` when the bridge call fails or the version string is
+        unparseable (e.g. empty, missing, or not starting with ``MAJOR.MINOR``).
+        """
+        bridge = self._bridge
+        if bridge is None:
+            raise RuntimeError("_fetch_godot_version called with no bridge")
+        try:
+            # Best-effort: use a short timeout so a slow bridge doesn't hang
+            # enable_toolset indefinitely.
+            response = await bridge.send("cmd_get_project_info", timeout=3.0)
+        except Exception:
+            return None
+        if not response.ok:
+            return None
+        version_str = (response.result or {}).get("godot_version", "")
+        return _parse_godot_version(version_str)
+
+
+def _parse_godot_version(version_str: str) -> tuple[int, int] | None:
+    """Parse a Godot version string (e.g. ``"4.4.1-stable"``) into ``(major, minor)``.
+
+    Returns ``None`` if the string does not **start** with a ``MAJOR.MINOR`` pattern.
+    """
+    if not version_str:
+        return None
+    m = re.match(r"(\d+)\.(\d+)", version_str)
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2))
+
+
+def register_toolset_tools(
+    mcp: FastMCP,
+    manager: ToolsetManager,
+    *,
+    hub: ToolsetSubscriptionHub | None = None,
+) -> None:
+    """Register the always-on toolset introspection/management tools.
+
+    ``hub`` (issue #620) is the server-global subscription bus: when present,
+    toggles publish ``tools/list_changed`` to every open ``subscriptions/listen``
+    stream, so clients on the sessionless protocol that can't receive an
+    unsolicited notification still refresh.
+    """
+
+    @mcp.tool(meta=READ_ONLY, tags={CORE_TAG})
+    async def list_toolsets(*, ctx: Context) -> list[ToolsetInfo]:
+        """List the available toolsets (tool categories) and whether each is currently
+        enabled. Enable a toolset with enable_toolset before using its tools.
+        """
+        return manager.status(ctx=ctx)
+
+    @mcp.tool(meta=READ_ONLY, tags={CORE_TAG})
+    async def enable_toolset(category: str, *, ctx: Context) -> ToolsetInfo:
+        """Expose a toolset's tools for this session. ``category`` is a toolset name
+        (e.g. "scene_edit"), a **bundle** — ``author`` (build scenes/scripts/assets),
+        ``playtest`` (run/drive/observe the game), ``ship`` (export) — or a
+        comma-separated list of either (issue #653). A bundle/list enables all its
+        members in ONE call and returns a combined result whose ``tools`` carries
+        every enabled member tool's schema. Does not change the Godot project.
+        """
+        names = [n.strip() for n in category.split(",") if n.strip()]
+        result = await manager.enable_many(names, ctx=ctx)
+        await _notify_tools_changed(ctx, hub)
+        await manager.push_enabled()  # #592: keep the addon dock's Toolsets row honest
+        return result
+
+    @mcp.tool(meta=READ_ONLY, tags={CORE_TAG})
+    async def disable_toolset(category: str, *, ctx: Context) -> ToolsetInfo:
+        """Hide a toolset's tools again to keep the active tool surface small. Accepts
+        a toolset name, a bundle, or a comma-separated list of either (issue #653)."""
+        names = [n.strip() for n in category.split(",") if n.strip()]
+        result = await manager.disable_many(names, ctx=ctx)
+        await _notify_tools_changed(ctx, hub)
+        await manager.push_enabled()  # #592: keep the addon dock's Toolsets row honest
+        return result
+
+
+async def _notify_tools_changed(ctx: Context, hub: ToolsetSubscriptionHub | None = None) -> None:
+    """Emit ``notifications/tools/list_changed`` after the enabled set changes so
+    clients refresh their cached tool registry (issue #485).
+
+    Two delivery paths, both fire-and-forget: ``ctx.send_notification`` reaches
+    the in-flight request's client on the sessionless protocol via
+    ``related_request_id`` (legacy push for older clients), and ``hub`` fans the
+    event out over ``subscriptions/listen`` for clients that explicitly
+    subscribe (issue #620). The toggle already succeeded, so a delivery failure
+    must never fail the tool call — but it is logged, never swallowed silently.
+    """
+    try:
+        await ctx.send_notification(ToolListChangedNotification())
+    except Exception:
+        logger.warning(
+            "tools/list_changed notification failed to send "
+            "(client may have disconnected); toolset toggle already applied",
+            exc_info=True,
+        )
+    if hub is not None:
+        await hub.publish_tools_changed()

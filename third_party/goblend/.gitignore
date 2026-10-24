@@ -1,0 +1,7 @@
+__pycache__
+.DS_Store
+.vscode
+*.uid
+*.zip
+.venv/
+goblend/typings/blender

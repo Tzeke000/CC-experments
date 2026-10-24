@@ -1,0 +1,35 @@
+# __init__.py
+#
+# Copyright (C) 2026-present Goblend contributers, see https://github.com/Togira123/Goblend-Export-Addon
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>
+
+
+import bpy
+
+from .src import export_ui
+from .src.config import get_config_at_startup
+
+# this import is needed for the glTF extension to register
+from .src.export.glTF2ExportUserExtension import glTF2ExportUserExtension  # noqa: F401
+
+
+def register() -> None:
+    export_ui.register()
+    bpy.app.handlers.load_post.append(get_config_at_startup)
+
+
+def unregister() -> None:
+    export_ui.unregister()
+    bpy.app.handlers.load_post.remove(get_config_at_startup)

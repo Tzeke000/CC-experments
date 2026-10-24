@@ -1,0 +1,57 @@
+"""stdio (and optional Streamable HTTP) entrypoint for the Godot Editor MCP server.
+
+Run with ``uv run godot-editor-mcp`` (or ``python -m mcp_server.main``). Transport
+defaults to stdio; set ``GODOT_MCP_TRANSPORT=http`` (with ``GODOT_MCP_HTTP_HOST`` /
+``GODOT_MCP_HTTP_PORT``) for a long-lived HTTP server. The FastMCP runtime owns
+the event loop — we never call ``asyncio.run`` here
+(see .opencode/rules/async-patterns.md).
+"""
+
+from __future__ import annotations
+
+import logging
+
+from mcp_server.config import ServerConfig
+from mcp_server.logging_setup import configure_logging
+from mcp_server.server import create_server
+
+logger = logging.getLogger(__name__)
+
+
+def main() -> None:
+    """Build the server from the environment and run it on the configured transport."""
+    config = ServerConfig.from_env()
+    configure_logging(config.log_level)
+    config.validate_http_auth()
+    # Making Things decision C: bridge token is required (auto-minted by from_env
+    # unless GODOT_MCP_ALLOW_INSECURE_BRIDGE=1). Log presence without the secret.
+    if config.bridge.auth_token:
+        logger.info("bridge auth enabled (token configured)")
+    else:
+        logger.warning(
+            "bridge auth DISABLED (GODOT_MCP_ALLOW_INSECURE_BRIDGE); "
+            "any local process can drive the editor"
+        )
+    logger.info("starting making-things-godot (godot-mcp morph)", extra={"transport": config.transport})
+
+    server = create_server(config)
+    try:
+        if config.transport == "http":
+            # #636: pass the Host/Origin guard explicitly so the live server does
+            # not depend on the global default having been set in create_server.
+            server.run(
+                transport="http",
+                host=config.host,
+                port=config.port,
+                host_origin_protection=config.http_host_origin_protection,
+            )
+        else:
+            server.run(transport="stdio")
+    except KeyboardInterrupt:
+        # Ctrl-C is the ordinary way to stop a long-lived server; exit quietly rather
+        # than dumping the runtime's shutdown traceback to the console.
+        logger.info("godot-mcp interrupted; shutting down")
+
+
+if __name__ == "__main__":
+    main()

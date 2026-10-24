@@ -1,0 +1,100 @@
+# LightPanelProperties.py
+#
+# Copyright (C) 2026-present Goblend contributers, see https://github.com/Togira123/Goblend-Export-Addon
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>
+
+
+import bpy
+
+from math import radians
+from ...types.property_types import (
+    BoolProp,
+    PointerProp,
+    EnumProp,
+    FloatProp,
+    FloatVectorProp,
+    IntProp,
+    typed_prop_group,
+)
+
+
+def can_add_light(self: bpy.types.PropertyGroup, obj: bpy.types.Object) -> bool:
+    if obj.type != "LIGHT":
+        return False
+    light = obj.data
+    if light is bpy.types.AreaLight:
+        return False
+    for item in bpy.context.scene.light_panel_props:
+        if item.light == obj:
+            return False
+    return True
+
+
+@typed_prop_group
+class LightPanelProperties(bpy.types.PropertyGroup):
+    open = BoolProp(default=True)
+    light = PointerProp(
+        name="Light",
+        type=bpy.types.Object,
+        poll=can_add_light,
+    )
+    type = EnumProp(
+        name="Light Node Type",
+        description="The type of light node used in Godot",
+        items=[
+            ("DirectionalLight3D", "DirectionalLight3D", "A DirectionalLight3D is used in Godot"),
+            ("OmniLight3D", "OmniLight3D", "An OmniLight3D is used in Godot"),
+            ("SpotLight3D", "SpotLight3D", "A SpotLight3D is used in Godot"),
+        ],
+    )
+    # omni specific settings
+    omni_range = FloatProp(name="Range", default=5.0)
+    omni_attenuation = FloatProp(name="Attenuation", default=1.0)
+    omni_shadow_mode = EnumProp(
+        name="Shadow Mode",
+        items=[
+            ("0", "Dual Paraboloid", "Use Shadow Mode 'Dual Paraboloid' in Godot", 0),
+            ("1", "Cube", "Use Shadow Mode 'Cube' in Godot", 1),
+        ],
+        default=1,
+    )
+    # spot specific settings
+    spot_range = FloatProp(name="Range", default=5.0, subtype="DISTANCE")
+    spot_attenuation = FloatProp(name="Attenuation", default=1.0)
+    spot_angle = FloatProp(name="Angle", default=radians(45.0), subtype="ANGLE")
+    spot_angle_attenuation = FloatProp(name="Angle Attenuation", default=1.0)
+
+    # general settings
+    light_color = FloatVectorProp(
+        name="Color", size=3, subtype="COLOR_GAMMA", default=[1.0, 1.0, 1.0], min=0.0, max=1.0
+    )
+    light_energy = FloatProp(name="Energy", default=1.0)
+    light_indirect_energy = FloatProp(name="Indirect Energy", default=1.0)
+    light_volumetric_fog_energy = FloatProp(name="Volumetric Fog Energy", default=1.0)
+    light_angular_distance = FloatProp(name="Angular Distance", default=0.0, subtype="ANGLE")
+    light_size = FloatProp(name="Size", default=0.0, subtype="DISTANCE")
+    light_negative = BoolProp(name="Negative", default=False)
+    light_specular = FloatProp(name="Specular", default=0.5)  # default is 1.0 for DirectionalLight3D
+    light_bake_mode = EnumProp(
+        name="Bake Mode",
+        items=[
+            ("0", "Disabled", "Use Bake Mode 'Disabled' in Godot", 0),
+            ("1", "Static", "Use Bake Mode 'Static' in Godot", 1),
+            ("2", "Dynamic", "Use Bake Mode 'Dynamic' in Godot", 2),
+        ],
+        default=2,
+    )
+    light_cull_mask = IntProp(name="Cull Mask", default=1048575, subtype="UNSIGNED")
+    shadow_enabled = BoolProp(name="Shadow", default=False)

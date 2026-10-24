@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "making-things-godot": {
+      "command": "uv",
+      "args": ["run", "--directory", "/ABS/PATH/TO/CC-experments", "godot-editor-mcp"],
+      "env": {
+        "GODOT_MCP_BRIDGE_TOKEN": "replace-me-with-a-long-random-secret",
+        "GODOT_MCP_GODOT_BIN": "/ABS/PATH/TO/Godot_v4.7.2-stable_linux.x86_64"
+      }
+    }
+  }
+}
