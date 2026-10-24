@@ -10,6 +10,25 @@ changes (required bridge token, live runtime property writes, third_party pipeli
 
 Upstream docs remain useful: [hybridindie.github.io/godot-mcp](https://hybridindie.github.io/godot-mcp/).
 
+## Making Things quick start
+
+1. Install Godot **4.7.2** (standard + mono if using C#): `bash scripts/download_godot.sh`
+2. Copy `addons/godot_mcp` into your Godot project (or open `fixtures/godot_project`).
+3. Set a shared bridge token (required):
+   ```bash
+   export GODOT_MCP_BRIDGE_TOKEN="$(openssl rand -hex 24)"
+   # same value in the editor environment / addon dock
+   ```
+4. Run the MCP server: `uv sync && uv run godot-editor-mcp`
+5. Point Cursor at it via [`.cursor/mcp.json.example`](.cursor/mcp.json.example).
+6. Skills live under [`.agents/skills/`](.agents/skills/) (Making Things) and [`skills/`](skills/) (upstream + copy).
+
+**Fixtures / CI:** `bash scripts/ci_import_smoke.sh` · `bash scripts/diagnose_fixture_smoke.sh` · live subset `bash scripts/live_editor_smoke.sh` (uses `xvfb-run` when needed).
+
+**Blender:** read `godot://conventions/blender`. Goblend remains **optional GPL** under `third_party/goblend/` — see `third_party/README.md`.
+
+**Compatibility:** [`docs/compatibility.md`](docs/compatibility.md)
+
 ---
 
 <p align="center">
@@ -18,7 +37,8 @@ Upstream docs remain useful: [hybridindie.github.io/godot-mcp](https://hybridind
   </a>
 </p>
 
-<h1 align="center">Godot Editor MCP <sub>(upstream base)</sub></h1>
+<p align="center"><em>Upstream product name (wire-compatible morph)</em></p>
+<h1 align="center">Godot Editor MCP</h1>
 
 <p align="center">
   A <strong>generic, game-agnostic</strong> <a href="https://modelcontextprotocol.io">Model Context Protocol</a> (MCP) server for <strong>AI-driven Godot development</strong>.
@@ -37,7 +57,7 @@ Upstream docs remain useful: [hybridindie.github.io/godot-mcp](https://hybridind
 >
 > For LLM agents: [`llms.txt`](https://hybridindie.github.io/godot-mcp/llms.txt) (page index) · [`llms-full.txt`](https://hybridindie.github.io/godot-mcp/llms-full.txt) (the whole site as one markdown document).
 
-> **Status:** feature-complete. **196 tools** across **29 categories** — always-on `core` plus 28 toggleable toolsets, of which only `inspection` is enabled by default (the rest are gated off until the agent asks). `godot-editor-mcp` on [PyPI](https://pypi.org/project/godot-editor-mcp/) · `ghcr.io/hybridindie/godot-mcp` · **version `2026.10.21b2`**.
+> **Status:** feature-complete. **199 tools** across **29 categories** — always-on `core` plus 28 toggleable toolsets, of which only `inspection` is enabled by default (the rest are gated off until the agent asks). `godot-editor-mcp` on [PyPI](https://pypi.org/project/godot-editor-mcp/) · `ghcr.io/hybridindie/godot-mcp` · **version `2026.10.21b2`**.
 
 > **One name, three identifiers.** **Godot Editor MCP** is the product: it drives the
 > **editor** as its surface, through the addon. The repository and MCP server ID stay

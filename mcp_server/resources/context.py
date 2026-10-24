@@ -1,4 +1,4 @@
-"""Read-only project-context resources (issue #11).
+"""Read-only project-context resources (issue #11 + Making Things observability).
 
 Addressable `godot://…` snapshots so an agent can reference project/scene/node
 state without a tool call each time. Resources are read-only and return JSON
@@ -21,6 +21,7 @@ from fastmcp.exceptions import ToolError
 
 from mcp_server.bridge import Bridge
 from mcp_server.categories import CORE_TAG
+from mcp_server.observability import BLENDER_CONVENTIONS, open_errors, recent_events
 from mcp_server.output import cap_json
 from mcp_server.safety import READ_ONLY
 
@@ -34,6 +35,13 @@ _STATIC: dict[str, tuple[str, dict[str, object]]] = {
     "godot://scene/current": ("cmd_get_active_scene", {}),
     "godot://scene/tree": ("cmd_get_scene_tree", {"max_depth": -1}),
     "godot://node/selected": ("cmd_get_selected_node", {}),
+}
+
+# Server-local resources (no bridge round-trip).
+_LOCAL_STATIC = {
+    "godot://logs/recent",
+    "godot://errors/open",
+    "godot://conventions/blender",
 }
 
 
@@ -51,9 +59,21 @@ async def _fetch_json(bridge: Bridge, command: str, params: dict[str, object]) -
     return json.dumps(error, indent=2)
 
 
+async def _read_local(uri: str) -> str:
+    if uri == "godot://logs/recent":
+        return cap_json(json.dumps(recent_events(limit=100), indent=2))
+    if uri == "godot://errors/open":
+        return cap_json(json.dumps(open_errors(limit=50), indent=2))
+    if uri == "godot://conventions/blender":
+        return json.dumps(BLENDER_CONVENTIONS, indent=2)
+    raise KeyError(uri)
+
+
 async def _read_uri(bridge: Bridge, uri: str) -> str:
     """Resolve any supported godot:// URI to its JSON content. Raises KeyError if
     the URI is not recognized."""
+    if uri in _LOCAL_STATIC:
+        return await _read_local(uri)
     if uri in _STATIC:
         command, params = _STATIC[uri]
         return await _fetch_json(bridge, command, params)
@@ -100,17 +120,35 @@ def register_resources(mcp: FastMCP, bridge: Bridge) -> list[str]:
         """The currently selected node snapshot, or {"selected": null} when none."""
         return await _read_uri(bridge, "godot://node/selected")
 
+    @mcp.resource("godot://logs/recent")
+    async def logs_recent() -> str:
+        """Making Things: recent structured MCP/bridge events (diagnose loop)."""
+        return await _read_local("godot://logs/recent")
+
+    @mcp.resource("godot://errors/open")
+    async def errors_open() -> str:
+        """Making Things: recent error/warning events for fix loops."""
+        return await _read_local("godot://errors/open")
+
+    @mcp.resource("godot://conventions/blender")
+    async def conventions_blender() -> str:
+        """Making Things: Blender→Godot export conventions + pipeline pointers."""
+        return await _read_local("godot://conventions/blender")
+
     @mcp.tool(meta=READ_ONLY, tags={CORE_TAG})
     async def read_resource(uri: str) -> str:
         """Read a godot:// context resource by URI — the fallback for MCP clients
         without resource-protocol support. Known URIs: godot://project/info,
         godot://scene/current, godot://scene/tree, godot://scene/tree/{max_depth},
-        godot://node/selected.
+        godot://node/selected, godot://logs/recent, godot://errors/open,
+        godot://conventions/blender.
         """
         try:
             return await _read_uri(bridge, uri)
         except KeyError:
-            known = ", ".join([*_STATIC, f"{SCENE_TREE_PREFIX}{{max_depth}}"])
+            known = ", ".join(
+                [*_STATIC, *_LOCAL_STATIC, f"{SCENE_TREE_PREFIX}{{max_depth}}"]
+            )
             raise ToolError(f"Unknown resource URI '{uri}'. Known: {known}.") from None
 
-    return [*_STATIC, f"{SCENE_TREE_PREFIX}{{max_depth}}"]
+    return [*_STATIC, *_LOCAL_STATIC, f"{SCENE_TREE_PREFIX}{{max_depth}}"]

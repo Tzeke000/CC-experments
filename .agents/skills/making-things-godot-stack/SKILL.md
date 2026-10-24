@@ -19,6 +19,14 @@ Mutation results include `persisted`, `undoable`, `reason`, `hint`. Never claim 
 
 - Inspect: `godot_runtime_get_game_scene_tree`, `godot_runtime_read_property`
 - Write: `godot_runtime_set_live_property` — **runtime-only** (`persisted=false`); use `previous_value` to undo; prefer `dry_run` first.
+- Prompt: `playtest_loop`
+
+## Sibling skills
+
+- `making-things-godot-inspect-fix`
+- `making-things-godot-playtest-debug`
+- `making-things-godot-blender-import`
+- `making-things-godot-observability`
 
 ## Blender → Godot (decisions D/E)
 

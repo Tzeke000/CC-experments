@@ -1,0 +1,68 @@
+# Making Things fixture / diagnose smokes on GitHub-hosted runners
+# (does not require hybridindie self-hosted Godot runners).
+name: making-things-smoke
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: mt-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  godot-import-diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Godot 4.7.2
+        run: |
+          set -euo pipefail
+          VER=4.7.2-stable
+          curl -fsSL -o /tmp/godot.zip \
+            "https://github.com/godotengine/godot/releases/download/${VER}/Godot_v${VER}_linux.x86_64.zip"
+          sudo unzip -o /tmp/godot.zip -d /usr/local/bin
+          sudo chmod +x /usr/local/bin/Godot_v${VER}_linux.x86_64
+          echo "GODOT_BIN=/usr/local/bin/Godot_v${VER}_linux.x86_64" >> "$GITHUB_ENV"
+
+      - name: Fixture import smoke
+        run: |
+          "$GODOT_BIN" --headless --path fixtures/godot_project --import --quit \
+            --log-file godot-import.log
+        continue-on-error: false
+
+      - name: Diagnose script smoke
+        run: GODOT_BIN="$GODOT_BIN" bash scripts/diagnose_fixture_smoke.sh
+
+      - name: Upload Godot logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: godot-smoke-logs
+          path: |
+            godot-import.log
+            .godot-smoke-logs/
+
+  python-unit-mt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+      - run: uv sync --frozen
+      - name: Making Things unit tests
+        env:
+          GODOT_MCP_ALLOW_INSECURE_BRIDGE: "1"
+        run: |
+          uv run pytest \
+            tests/unit/test_observability.py \
+            tests/unit/test_set_live_property_model.py \
+            tests/contract/test_bridge_auth.py \
+            tests/unit/test_command_map.py \
+            -q --tb=line

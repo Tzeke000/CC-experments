@@ -27,6 +27,7 @@ from mcp_server.bridge import Bridge
 from mcp_server.defaults import (
     DEFAULT_POLL_INTERVAL_SECONDS,
 )
+from mcp_server.observability import new_correlation_id, record_event
 from mcp_server.paths import escapes_res_root
 
 T = TypeVar("T", bound=BaseModel)
@@ -270,16 +271,46 @@ async def route(
     """
     await validate_or_raise(bridge, command, params)
 
+    corr_id = new_correlation_id()
+    corr = {"bridge_id": corr_id, "command": command}
     response = await bridge.send(command, params or {})
 
     if not response.ok:
+        record_event(
+            source="mcp",
+            level="error",
+            code=str(response.error or "INTERNAL_ERROR"),
+            message=str(response.hint or response.error or "bridge command failed"),
+            corr=corr,
+            data={"ok": False},
+        )
         raise AgentToolError(
             response.error or "INTERNAL_ERROR",
             response.hint or "",
             required=response.required,
             next_call=response.next_call,
         )
-    return response.result or {}
+    result = response.result or {}
+    # Surface honesty failures as warnings even when ok=true (persisted=false).
+    level = "info"
+    code = ""
+    if result.get("persisted") is False and result.get("ok") is not False:
+        level = "warn"
+        code = str(result.get("reason") or "NOT_PERSISTED")
+    record_event(
+        source="mcp",
+        level=level,
+        code=code,
+        message=f"{command} ok",
+        corr=corr,
+        data={
+            "ok": True,
+            "persisted": result.get("persisted"),
+            "undoable": result.get("undoable"),
+            "channel": result.get("channel"),
+        },
+    )
+    return result
 
 
 async def poll_ready(

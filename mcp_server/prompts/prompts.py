@@ -59,12 +59,14 @@ def register_prompts(mcp: FastMCP, bridge: Bridge) -> list[str]:
         _register_toolset_discovery(mcp),
         _register_build_scene(mcp),
         _register_play_test(mcp),
+        _register_playtest_loop(mcp),
         _register_script_edit(mcp),
         _register_debug_scene(mcp),
         _register_troubleshoot(mcp),
         _register_author_resource(mcp),
         _register_export_build(mcp),
         _register_batch_refactor(mcp),
+        _register_fix_import(mcp),
     ]
 
 
@@ -608,3 +610,68 @@ def _register_batch_refactor(mcp: FastMCP) -> str:
         ]
 
     return "batch_refactor"
+
+
+def _register_playtest_loop(mcp: FastMCP) -> str:
+    @mcp.prompt(
+        name="playtest_loop",
+        description=(
+            "Making Things: play → readiness → remote inspect / live mutate / "
+            "screenshot → stop. Extends play_test with set_live_property and logs."
+        ),
+    )
+    def playtest_loop(scene_path: str = "res://scenes/main.tscn") -> list[Message]:
+        """Playtest loop including Making Things live mutate + observability."""
+        return [
+            Message(
+                role="user",
+                content=(
+                    f"Run a Making Things playtest_loop on '{scene_path}'.\n\n"
+                    "1) godot_enable_toolset('runtime'); godot_enable_toolset('input')\n"
+                    "2) Ensure MCPRuntimeProbe autoload (resources_edit if needed)\n"
+                    f"3) godot_runtime_play_scene(scene_path='{scene_path}')\n"
+                    "4) godot_runtime_get_game_scene_tree() — confirm live hierarchy\n"
+                    "5) godot_runtime_get_game_output() — read errors/warnings\n"
+                    "6) Optional live tweak: godot_runtime_set_live_property(\n"
+                    "     node_path='...', property='...', value=..., dry_run=True first)\n"
+                    "   Remember persisted=false — runtime only; use previous_value to undo\n"
+                    "7) Optional: godot_runtime_capture_game_screenshot() if display available\n"
+                    "8) godot_get_open_errors() / godot://errors/open for MCP-side failures\n"
+                    "9) godot_runtime_stop_scene()\n"
+                    "Headless-only? Use godot_runtime_run_and_capture instead of play_scene."
+                ),
+            ),
+        ]
+
+    return "playtest_loop"
+
+
+def _register_fix_import(mcp: FastMCP) -> str:
+    @mcp.prompt(
+        name="fix_import",
+        description=(
+            "Making Things: Blender→Godot glTF import workflow — conventions, "
+            "place asset, reimport, inspect tree. Goblend is optional GPL."
+        ),
+    )
+    def fix_import(asset_path: str = "res://art/sample.glb") -> list[Message]:
+        """Guide glTF import verification."""
+        return [
+            Message(
+                role="user",
+                content=(
+                    f"Import / verify Blender asset '{asset_path}' into Godot.\n\n"
+                    "1) Read godot://conventions/blender (or godot_read_resource)\n"
+                    "2) Enable toolsets: asset_import, inspection, project\n"
+                    "3) If the file is outside the project, godot_asset_import_asset(...)\n"
+                    "   else ensure it is under res://art/ and trigger reimport / scan\n"
+                    "4) godot_asset_import_get_status / await filesystem idle\n"
+                    "5) godot_inspection_get_scene_tree after opening the imported scene\n"
+                    "6) Confirm expected node names; do not claim success without tree evidence\n"
+                    "Pipelines: MIT addons/gltf_pipeline (extras). Goblend under "
+                    "third_party/goblend is GPL — optional only."
+                ),
+            ),
+        ]
+
+    return "fix_import"

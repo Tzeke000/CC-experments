@@ -58,6 +58,7 @@ from mcp_server.tools.inspection import register_inspection
 from mcp_server.tools.mutation import register_mutation
 from mcp_server.tools.navigation import register_navigation
 from mcp_server.tools.node_ops import register_node_ops
+from mcp_server.tools.observability_tools import register_observability_tools
 from mcp_server.tools.particles import register_particles
 from mcp_server.tools.physics import register_physics
 from mcp_server.tools.profiling import register_profiling
@@ -239,6 +240,7 @@ def create_server(
     mcp.add_extension(TasksExtension())
 
     register_health(mcp, bridge, config)
+    register_observability_tools(mcp, bridge)
     register_undo(mcp, bridge)
     register_class_info(mcp, bridge)
     register_inspection(mcp, bridge)
