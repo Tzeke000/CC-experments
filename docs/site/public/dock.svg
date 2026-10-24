@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 140" width="960" height="140" role="img" aria-label="The godot-mcp status dock in the Godot editor. Row one: a green Connected dot, Godot 4.7, the bridge URL ws://127.0.0.1:9080, the active scene main.tscn (unsaved, dot marker), and the selected node Player. Row two: last action create_node 'Player' (Ctrl+Z to undo) and the enabled toolsets core, inspection, scene_edit. Row three: an outcome-bearing recent-command log listing enable_toolset('scene_edit') in 12 ms and scene_edit_create_node('Player') in 31 ms.">
+  <style>
+    text { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    .p { fill: #e6eaf0; font-size: 15px; font-weight: 700; }
+    .s { fill: #9aa3b2; font-size: 13.5px; }
+    .l { fill: #8b93a1; font-size: 13px; }
+    .v { fill: #d7dce4; font-size: 13.5px; }
+  </style>
+  <rect x="1" y="1" width="958" height="138" rx="10" fill="#22262e" stroke="#3a3f47" stroke-width="2"/>
+
+  <!-- row 1: connection + project + bridge + scene + node -->
+  <circle cx="26" cy="31" r="6" fill="#4ec26b"/>
+  <text x="42" y="36" class="p">Connected</text>
+  <text x="146" y="36" class="s">Godot 4.7</text>
+  <text x="246" y="36" class="s">ws://127.0.0.1:9080</text>
+  <text x="440" y="36" class="s">scene: main.tscn</text>
+  <circle cx="586" cy="31" r="4" fill="#e0b64a"/>
+  <text x="602" y="36" class="s">node: Player</text>
+
+  <line x1="20" y1="54" x2="940" y2="54" stroke="#3a3f47" stroke-width="1"/>
+
+  <!-- row 2: last undoable action + enabled toolsets -->
+  <text x="26" y="80" class="l">Last action:</text>
+  <text x="122" y="80" class="v">create_node 'Player'</text>
+  <text x="312" y="80" class="l">(Ctrl+Z to undo)</text>
+  <text x="470" y="80" class="l">Toolsets:</text>
+  <text x="548" y="80" class="v">core · inspection · scene_edit</text>
+
+  <line x1="20" y1="98" x2="940" y2="98" stroke="#3a3f47" stroke-width="1"/>
+
+  <!-- row 3: recent-command log (outcome-bearing) -->
+  <text x="26" y="124" class="s" fill="#4ec26b">✓</text>
+  <text x="44" y="124" class="v">enable_toolset('scene_edit')</text>
+  <text x="336" y="124" class="l">12 ms</text>
+  <text x="420" y="124" class="s" fill="#4ec26b">✓</text>
+  <text x="438" y="124" class="v">scene_edit_create_node('Player')</text>
+  <text x="756" y="124" class="l">31 ms</text>
+</svg>

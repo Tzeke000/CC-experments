@@ -1,0 +1,314 @@
+"""End-to-end project & filesystem test against a live editor (issue #32).
+
+Runs the fs-tree / search / settings / UID handlers against the real project. The
+set_setting test writes project.godot, so the test snapshots and restores it.
+Skipped without Godot.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import subprocess
+from typing import Any
+
+import pytest
+
+from mcp_server.bridge import Bridge
+from mcp_server.config import BridgeConfig
+from tests.integration._godot import (
+    GODOT_BIN,
+    GODOT_PROJECT,
+    e2e_bridge_url,
+    serve_and_await_editor,
+)
+
+pytestmark = pytest.mark.skipif(GODOT_BIN is None, reason="Godot binary not installed")
+
+# Ephemeral per-run port (issue #444): no fixed port, so a concurrent
+# job's (or an orphaned) editor can never connect to this test's listener.
+BRIDGE_URL = e2e_bridge_url()
+PROJECT_GODOT = GODOT_PROJECT / "project.godot"
+ADDON = "res://addons/godot_mcp"
+
+
+async def _ok(bridge: Bridge, command: str, params: dict[str, Any]) -> dict[str, Any]:
+    response = await bridge.send(command, params)
+    assert response.ok and response.result is not None, (
+        f"{command}: {response.error} {response.hint}"
+    )
+    return response.result
+
+
+async def _run() -> None:
+    bridge = Bridge(BridgeConfig(url=BRIDGE_URL))
+    if not await serve_and_await_editor(bridge):
+        raise AssertionError("the addon never connected to the bridge")
+
+    try:
+        # filesystem tree of the addon dir includes its scripts
+        tree = await _ok(bridge, "cmd_get_filesystem_tree", {"directory": ADDON, "max_depth": 1})
+        names = [c["name"] for c in tree["tree"]["children"]]
+        assert "command_router.gd" in names
+
+        # search by glob, and by content
+        by_glob = await _ok(bridge, "cmd_search_files", {"directory": ADDON, "name_glob": "*.gd"})
+        assert any(m.endswith("command_router.gd") for m in by_glob["matches"])
+        by_content = await _ok(
+            bridge,
+            "cmd_search_files",
+            {"directory": ADDON, "content": "class_name MCPCommandRouter"},
+        )
+        assert any(m.endswith("command_router.gd") for m in by_content["matches"])
+
+        # settings: existing + missing
+        present = await _ok(bridge, "cmd_get_setting", {"name": "application/config/name"})
+        assert present["exists"] is True and present["value"] == "godot-mcp"
+        missing = await _ok(bridge, "cmd_get_setting", {"name": "nonexistent/key"})
+        assert missing["exists"] is False
+
+        # write a setting, read it back
+        await _ok(
+            bridge,
+            "cmd_set_setting",
+            {"name": "application/config/description", "value": "e2e test description"},
+        )
+        readback = await _ok(bridge, "cmd_get_setting", {"name": "application/config/description"})
+        assert readback["value"] == "e2e test description"
+
+        # #462: an obvious typo'd key inside a known engine section is refused
+        # with a structured VALIDATION_ERROR + a hint naming the likely intended
+        # key — nothing is written.
+        typo = await bridge.send(
+            "cmd_set_setting",
+            {"name": "application/config/main_scene", "value": "res://main.tscn"},
+        )
+        assert typo.ok is False and typo.error == "VALIDATION_ERROR", (
+            f"typo'd key accepted: {typo.error} {typo.hint}"
+        )
+        assert "main_scene" in (typo.hint or "")
+        still_missing = await _ok(
+            bridge, "cmd_get_setting", {"name": "application/config/main_scene"}
+        )
+        assert still_missing["exists"] is False
+
+        # #462: a custom user-section key (no engine declaration) stays allowed.
+        custom = await _ok(
+            bridge,
+            "cmd_set_setting",
+            {"name": "godot_mcp_e2e/custom_key", "value": 42},
+        )
+        assert custom["set"] is True
+        custom_read = await _ok(bridge, "cmd_get_setting", {"name": "godot_mcp_e2e/custom_key"})
+        assert custom_read["value"] == 42
+
+        # UID round-trip on a script that has a .uid
+        to_uid = await _ok(
+            bridge, "cmd_path_to_uid", {"path": "res://addons/godot_mcp/godot_mcp.gd"}
+        )
+        assert to_uid["uid"].startswith("uid://")
+        back = await _ok(bridge, "cmd_uid_to_path", {"uid": to_uid["uid"]})
+        assert back["path"] == "res://addons/godot_mcp/godot_mcp.gd"
+
+        # Sandbox: paths outside the project (res://) are rejected.
+        outside = await bridge.send("cmd_get_filesystem_tree", {"directory": "/etc"})
+        assert outside.ok is False and outside.error == "VALIDATION_ERROR"
+
+        # delete_resource_file round-trip (#217): create a throwaway file, delete it,
+        # confirm it's gone, and that a second delete + a non-res:// path are rejected.
+        tmp = "res://tmp_e2e_delete.gd"
+        await _ok(bridge, "cmd_write_script", {"script_path": tmp, "content": "extends Node\n"})
+        deleted = await _ok(bridge, "cmd_delete_resource_file", {"path": tmp})
+        assert deleted["deleted"] is True and deleted["path"] == tmp
+        assert deleted["receipt"]["status"] == "updated"
+        assert deleted["receipt"]["changes"][0]["op"] == "remove"
+        gone = await bridge.send("cmd_delete_resource_file", {"path": tmp})
+        assert gone.ok is False and gone.error == "RESOURCE_NOT_FOUND"
+        bad = await bridge.send("cmd_delete_resource_file", {"path": "/etc/passwd"})
+        assert bad.ok is False and bad.error == "VALIDATION_ERROR"
+    finally:
+        await bridge.close()
+        # #647: the write_script .uid sidecar can outlive the delete — clean it up.
+        for name in ("tmp_e2e_delete.gd", "tmp_e2e_delete.gd.uid"):
+            (GODOT_PROJECT / name).unlink(missing_ok=True)
+
+
+# #422: deleting a .tscn that is open in the editor leaves a stale in-memory tab;
+# recreating at the same path resurrects mangled duplicates. delete_resource_file
+# must close the tab for a deleted scene (and save_scene/create_scene must never
+# write through the stale in-memory copy).
+async def _run_delete_open_scene() -> None:
+    bridge = Bridge(BridgeConfig(url=BRIDGE_URL))
+    if not await serve_and_await_editor(bridge):
+        raise AssertionError("the addon never connected to the bridge")
+    scene = "res://tmp_e2e_delete_tab.tscn"
+    scene_file = GODOT_PROJECT / "tmp_e2e_delete_tab.tscn"
+    try:
+        created = await _ok(
+            bridge,
+            "cmd_create_scene",
+            {"root_type": "Node3D", "scene_path": scene},
+        )
+        assert created["created"] is True
+        # The created scene is now open+active; add a node so the tab has content.
+        await _ok(
+            bridge,
+            "cmd_create_node",
+            {"parent_path": ".", "node_type": "Node3D", "name": "Original"},
+        )
+
+        deleted = await _ok(bridge, "cmd_delete_resource_file", {"path": scene})
+        assert deleted["deleted"] is True
+        assert not scene_file.exists()
+
+        # The tab must be gone: the deleted scene may no longer be open/active.
+        active = await bridge.send("cmd_get_active_scene")
+        active_path = (active.result or {}).get("path")
+        assert active_path != scene, (
+            "deleted scene is still the active (stale) tab — recreate would resurrect it"
+        )
+
+        # Recreate at the same path and confirm a clean, empty scene opens.
+        recreated = await _ok(
+            bridge,
+            "cmd_create_scene",
+            {"root_type": "Node3D", "scene_path": scene},
+        )
+        assert recreated["created"] is True
+        tree = await _ok(bridge, "cmd_get_scene_tree", {})
+        root_children = tree["tree"]["children"]
+        names = [c["name"] for c in root_children]
+        assert names == [], f"recreated scene is not empty: {names} — stale tab resurrected"
+    finally:
+        await bridge.close()
+        scene_file.unlink(missing_ok=True)
+        (GODOT_PROJECT / "tmp_e2e_delete_tab.tscn.uid").unlink(missing_ok=True)
+
+
+# Qodo PR-review finding (PR #440): close_scene() closes the ACTIVE tab — with
+# multiple tabs open and the deleted scene NOT active, the old code closed the
+# wrong scene. The handler must activate the target tab first (open_scene_from_path
+# re-activates an already-open tab) and verify the switch before closing.
+async def _run_delete_open_scene_multi_tab() -> None:
+    bridge = Bridge(BridgeConfig(url=BRIDGE_URL))
+    if not await serve_and_await_editor(bridge):
+        raise AssertionError("the addon never connected to the bridge")
+    victim = "res://tmp_e2e_delete_tab_victim.tscn"
+    bystander = "res://tmp_e2e_delete_tab_bystander.tscn"
+    victim_file = GODOT_PROJECT / "tmp_e2e_delete_tab_victim.tscn"
+    bystander_file = GODOT_PROJECT / "tmp_e2e_delete_tab_bystander.tscn"
+    try:
+        # Create two scenes; the second create leaves it open+active.
+        created = await _ok(
+            bridge,
+            "cmd_create_scene",
+            {"root_type": "Node3D", "scene_path": victim},
+        )
+        assert created["created"] is True
+        await _ok(
+            bridge,
+            "cmd_create_node",
+            {"parent_path": ".", "node_type": "Node3D", "name": "VictimMarker"},
+        )
+        created = await _ok(
+            bridge,
+            "cmd_create_scene",
+            {"root_type": "Node3D", "scene_path": bystander},
+        )
+        assert created["created"] is True
+        await _ok(
+            bridge,
+            "cmd_create_node",
+            {"parent_path": ".", "node_type": "Node3D", "name": "BystanderMarker"},
+        )
+
+        # The victim is open but NOT active — delete it from under the bystander.
+        active = await _ok(bridge, "cmd_get_active_scene", {})
+        assert active["path"] == bystander, f"precondition: bystander not active ({active})"
+        deleted = await _ok(bridge, "cmd_delete_resource_file", {"path": victim})
+        assert deleted["deleted"] is True
+        assert deleted["tab_closed"] is True
+        assert not victim_file.exists()
+
+        # The bystander tab must survive with its content intact.
+        open_scenes = await _ok(bridge, "cmd_list_open_scenes", {})
+        open_paths = [str(s["path"]) for s in open_scenes["scenes"]]
+        assert bystander in open_paths, f"wrong tab closed: bystander missing from {open_paths}"
+        assert victim not in open_paths, f"victim tab still open: {open_paths}"
+        await _ok(
+            bridge,
+            "cmd_open_scene",
+            {"scene_path": bystander},
+        )
+        tree = await _ok(bridge, "cmd_get_scene_tree", {})
+        names = [c["name"] for c in tree["tree"]["children"]]
+        assert "BystanderMarker" in names, f"bystander content lost: {names}"
+    finally:
+        await bridge.close()
+        victim_file.unlink(missing_ok=True)
+        (GODOT_PROJECT / "tmp_e2e_delete_tab_victim.tscn.uid").unlink(missing_ok=True)
+        bystander_file.unlink(missing_ok=True)
+        (GODOT_PROJECT / "tmp_e2e_delete_tab_bystander.tscn.uid").unlink(missing_ok=True)
+
+
+def test_live_delete_open_scene_closes_tab() -> None:
+    assert GODOT_BIN is not None
+    editor = subprocess.Popen(
+        [GODOT_BIN, "--headless", "--editor", "--path", str(GODOT_PROJECT)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env={**os.environ, "GODOT_MCP_BRIDGE_URL": BRIDGE_URL},
+    )
+    try:
+        asyncio.run(_run_delete_open_scene())
+    finally:
+        editor.terminate()
+        try:
+            editor.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            editor.kill()
+        (GODOT_PROJECT / "tmp_e2e_delete_tab.tscn").unlink(missing_ok=True)
+        (GODOT_PROJECT / "tmp_e2e_delete_tab.tscn.uid").unlink(missing_ok=True)
+
+
+def test_live_delete_open_scene_multi_tab_closes_correct_tab() -> None:
+    assert GODOT_BIN is not None
+    editor = subprocess.Popen(
+        [GODOT_BIN, "--headless", "--editor", "--path", str(GODOT_PROJECT)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env={**os.environ, "GODOT_MCP_BRIDGE_URL": BRIDGE_URL},
+    )
+    try:
+        asyncio.run(_run_delete_open_scene_multi_tab())
+    finally:
+        editor.terminate()
+        try:
+            editor.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            editor.kill()
+        (GODOT_PROJECT / "tmp_e2e_delete_tab_victim.tscn").unlink(missing_ok=True)
+        (GODOT_PROJECT / "tmp_e2e_delete_tab_victim.tscn.uid").unlink(missing_ok=True)
+        (GODOT_PROJECT / "tmp_e2e_delete_tab_bystander.tscn").unlink(missing_ok=True)
+        (GODOT_PROJECT / "tmp_e2e_delete_tab_bystander.tscn.uid").unlink(missing_ok=True)
+
+
+def test_live_project_fs() -> None:
+    """The fs-tree/search/settings/UID round-trips (#32) + the #462 key gate."""
+    assert GODOT_BIN is not None
+    snapshot = PROJECT_GODOT.read_text()
+    editor = subprocess.Popen(
+        [GODOT_BIN, "--headless", "--editor", "--path", str(GODOT_PROJECT)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env={**os.environ, "GODOT_MCP_BRIDGE_URL": BRIDGE_URL},
+    )
+    try:
+        asyncio.run(_run())
+    finally:
+        editor.terminate()
+        try:
+            editor.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            editor.kill()
+        PROJECT_GODOT.write_text(snapshot)  # undo the set_setting writes

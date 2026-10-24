@@ -1,0 +1,266 @@
+@tool
+extends SceneTree
+## Headless behavior test for the read-only inspection serializers (issue #5).
+##
+## Run via: godot --headless --path godot/ --script res://tests/inspect_smoke.gd
+## Exercises the pure, editor-independent helpers MCPTypeCoerce and
+## MCPSceneInspect — JSON-safe type coercion, recursive scene serialization, and
+## max_depth — without EditorInterface. The editor glue in the cmd_* handlers is
+## covered by the cross-process e2e test (test_inspection_e2e.py).
+
+const Coerce := preload("res://addons/godot_mcp/type_coerce.gd")
+const Inspect := preload("res://addons/godot_mcp/scene_inspect.gd")
+const Probe := preload("res://tests/fixtures/probe.gd")
+
+
+func _initialize() -> void:
+	var failures: Array[String] = []
+	_test_type_coerce(failures)
+	_test_from_json(failures)
+	_test_serialize_tree(failures)
+	_test_node_properties(failures)
+	_test_read_property(failures)
+	_test_node_groups(failures)
+	_test_normalize_node_path(failures)
+	_test_node_info(failures)
+	_test_snapshot_tree(failures)
+
+	if failures.is_empty():
+		print("INSPECT_TEST_OK")
+		quit(0)
+	else:
+		for f in failures:
+			printerr("FAIL: %s" % f)
+		print("INSPECT_TEST_FAIL")
+		quit(1)
+
+
+func _eq(failures: Array[String], label: String, got: Variant, want: Variant) -> void:
+	# Type first: comparing mismatched types (e.g. Dictionary vs Vector4) is a script
+	# error in Godot 4 that aborts _eq before the failure can be recorded.
+	if typeof(got) != typeof(want) or got != want:
+		failures.append("%s: expected %s, got %s" % [label, str(want), str(got)])
+
+
+func _test_type_coerce(failures: Array[String]) -> void:
+	_eq(failures, "vector2", Coerce.to_json(Vector2(1, 2)), {"x": 1.0, "y": 2.0})
+	_eq(failures, "vector3", Coerce.to_json(Vector3(1, 2, 3)), {"x": 1.0, "y": 2.0, "z": 3.0})
+	_eq(failures, "vector4", Coerce.to_json(Vector4(1, 2, 3, 4)), {"x": 1.0, "y": 2.0, "z": 3.0, "w": 4.0})
+	_eq(failures, "vector4i", Coerce.to_json(Vector4i(1, 2, 3, 4)), {"x": 1, "y": 2, "z": 3, "w": 4})
+	_eq(failures, "color", Coerce.to_json(Color(1, 0, 0, 1)), {"r": 1.0, "g": 0.0, "b": 0.0, "a": 1.0})
+	_eq(failures, "nodepath", Coerce.to_json(NodePath("a/b")), "a/b")
+	_eq(failures, "array", Coerce.to_json([Vector2(0, 0), 5]), [{"x": 0.0, "y": 0.0}, 5])
+	_eq(failures, "dict", Coerce.to_json({"v": Vector2(1, 1)}), {"v": {"x": 1.0, "y": 1.0}})
+	# Primitives pass through unchanged.
+	_eq(failures, "int", Coerce.to_json(42), 42)
+	_eq(failures, "string", Coerce.to_json("hi"), "hi")
+	_eq(failures, "bool", Coerce.to_json(true), true)
+	_eq(failures, "null", Coerce.to_json(null), null)
+	# A path-less Resource coerces to its class name, never str() instance details.
+	_eq(failures, "resource_classname", Coerce.to_json(Resource.new()), "Resource")
+
+
+func _test_from_json(failures: Array[String]) -> void:
+	# Dict form (symmetric with to_json) and array form both coerce.
+	_eq(failures, "fj.vector2.dict", Coerce.from_json({"x": 1, "y": 2}, TYPE_VECTOR2), Vector2(1, 2))
+	_eq(failures, "fj.vector2.arr", Coerce.from_json([1, 2], TYPE_VECTOR2), Vector2(1, 2))
+	_eq(failures, "fj.vector3", Coerce.from_json({"x": 1, "y": 2, "z": 3}, TYPE_VECTOR3), Vector3(1, 2, 3))
+	# Vector4 (#464): shader vec4 uniforms coerce through here.
+	_eq(failures, "fj.vector4.dict", Coerce.from_json({"x": 1, "y": 2, "z": 3, "w": 4}, TYPE_VECTOR4), Vector4(1, 2, 3, 4))
+	_eq(failures, "fj.vector4.arr", Coerce.from_json([1, 0.5, 0.25, 1], TYPE_VECTOR4), Vector4(1, 0.5, 0.25, 1))
+	_eq(failures, "fj.vector4i.arr", Coerce.from_json([1, 2, 3, 4], TYPE_VECTOR4I), Vector4i(1, 2, 3, 4))
+	_eq(failures, "fj.vector4.roundtrip", Coerce.from_json(Coerce.to_json(Vector4(5, 6, 7, 8)), TYPE_VECTOR4), Vector4(5, 6, 7, 8))
+	_eq(failures, "fj.color", Coerce.from_json({"r": 1, "g": 0, "b": 0, "a": 1}, TYPE_COLOR), Color(1, 0, 0, 1))
+	_eq(failures, "fj.nodepath", Coerce.from_json("a/b", TYPE_NODE_PATH), NodePath("a/b"))
+	_eq(failures, "fj.int", Coerce.from_json(5, TYPE_INT), 5)
+	_eq(failures, "fj.float", Coerce.from_json(2.5, TYPE_FLOAT), 2.5)
+	_eq(failures, "fj.bool", Coerce.from_json(true, TYPE_BOOL), true)
+	_eq(failures, "fj.string", Coerce.from_json("hi", TYPE_STRING), "hi")
+	# Round-trips through to_json.
+	_eq(failures, "fj.roundtrip", Coerce.from_json(Coerce.to_json(Vector2(3, 4)), TYPE_VECTOR2), Vector2(3, 4))
+	var rect: Variant = Coerce.from_json({"position": [0, 0], "size": [4, 5]}, TYPE_RECT2)
+	_eq(failures, "fj.rect2", rect, Rect2(0, 0, 4, 5))
+	# Malformed Rect2 input must not crash; it degrades to a default.
+	_eq(failures, "fj.rect2.bad", Coerce.from_json("oops", TYPE_RECT2), Rect2())
+
+	# String forms (issue #51): "Vector2(...)" / "Rect2(...)" via str_to_var, hex via Color.html.
+	_eq(failures, "fj.str.vec2", Coerce.from_json("Vector2(100, 200)", TYPE_VECTOR2), Vector2(100, 200))
+	_eq(failures, "fj.str.vec3", Coerce.from_json("Vector3(1, 2, 3)", TYPE_VECTOR3), Vector3(1, 2, 3))
+	_eq(failures, "fj.str.vec4", Coerce.from_json("Vector4(1, 2, 3, 4)", TYPE_VECTOR4), Vector4(1, 2, 3, 4))
+	_eq(failures, "fj.str.vec4i", Coerce.from_json("Vector4i(1, 2, 3, 4)", TYPE_VECTOR4I), Vector4i(1, 2, 3, 4))
+	_eq(failures, "fj.str.vec4.bad", Coerce.from_json("nope", TYPE_VECTOR4), Vector4())
+	_eq(failures, "fj.str.rect2", Coerce.from_json("Rect2(0, 0, 4, 5)", TYPE_RECT2), Rect2(0, 0, 4, 5))
+	_eq(failures, "fj.str.color", Coerce.from_json("#00ff00", TYPE_COLOR), Color(0, 1, 0, 1))
+	_eq(failures, "fj.str.color.alpha", Coerce.from_json("#0000ffff", TYPE_COLOR), Color(0, 0, 1, 1))
+	# A plain string still passes through for TYPE_STRING.
+	_eq(failures, "fj.str.passthrough", Coerce.from_json("hello", TYPE_STRING), "hello")
+	# A non-constructor string for a composite type falls back to default (no str_to_var).
+	_eq(failures, "fj.str.vec2.bad", Coerce.from_json("nope", TYPE_VECTOR2), Vector2())
+
+
+func _test_serialize_tree(failures: Array[String]) -> void:
+	var world := Node2D.new()
+	world.name = "World"
+	var sprite := Sprite2D.new()
+	sprite.name = "Sprite"
+	var deep := Node.new()
+	deep.name = "Deep"
+	world.add_child(sprite)
+	sprite.add_child(deep)
+
+	var full: Dictionary = Inspect.serialize_tree(world)
+	_eq(failures, "tree.name", full.get("name"), "World")
+	_eq(failures, "tree.type", full.get("type"), "Node2D")
+	_eq(failures, "tree.script", full.get("script"), null)
+	# Every node carries an explicit scene-relative path (#180): "." at the root,
+	# and nested paths below it ("Sprite", "Sprite/Deep") in path-taking-tool form.
+	_eq(failures, "tree.path", full.get("path"), ".")
+	var children: Array = full.get("children")
+	if children.size() != 1 or children[0].get("name") != "Sprite":
+		failures.append("tree children wrong: %s" % str(children))
+	elif children[0].get("children")[0].get("name") != "Deep":
+		failures.append("tree grandchild wrong")
+	else:
+		_eq(failures, "tree.child.path", children[0].get("path"), "Sprite")
+		_eq(failures, "tree.grandchild.path", children[0].get("children")[0].get("path"), "Sprite/Deep")
+
+	# max_depth=1 ⇒ root + immediate children, but their children truncated.
+	var shallow: Dictionary = Inspect.serialize_tree(world, 1)
+	var shallow_children: Array = shallow.get("children")
+	_eq(failures, "depth1.child", shallow_children[0].get("name"), "Sprite")
+	_eq(failures, "depth1.truncated", shallow_children[0].get("children"), [])
+
+	# lightweight=true ⇒ {name, type, children} only, no script serialization (#168).
+	var light: Dictionary = Inspect.serialize_tree(world, -1, true)
+	_eq(failures, "light.name", light.get("name"), "World")
+	_eq(failures, "light.type", light.get("type"), "Node2D")
+	_eq(failures, "light.no_script", light.has("script"), false)
+	_eq(failures, "light.path", light.get("path"), ".")  # path stays even when lightweight (#180)
+	var light_children: Array = light.get("children")
+	_eq(failures, "light.child", light_children[0].get("name"), "Sprite")
+	_eq(failures, "light.child_no_script", light_children[0].has("script"), false)
+
+	# Output must be JSON-safe (stringify must not error).
+	if JSON.stringify(full) == "":
+		failures.append("serialized tree is not JSON-safe")
+
+	world.free()
+
+
+func _test_node_properties(failures: Array[String]) -> void:
+	var node := Node2D.new()
+	node.set_script(Probe)
+	var props: Dictionary = Inspect.node_properties(node)
+	_eq(failures, "props.speed", props.get("speed"), 200.0)
+	_eq(failures, "props.health", props.get("health"), 100)
+	node.free()
+
+
+func _test_read_property(failures: Array[String]) -> void:
+	# read_property reads built-ins the script-var filter hides, plus script vars,
+	# and reports exists=false for absent names (issue #215).
+	var node := Node2D.new()
+	node.set_script(Probe)
+	node.position = Vector2(10, 20)
+	var pos: Dictionary = Inspect.read_property(node, "position")
+	_eq(failures, "read.builtin.exists", pos.get("exists"), true)
+	_eq(failures, "read.builtin.value", pos.get("value"), {"x": 10.0, "y": 20.0})
+	var speed: Dictionary = Inspect.read_property(node, "speed")
+	_eq(failures, "read.script.exists", speed.get("exists"), true)
+	_eq(failures, "read.script.value", speed.get("value"), 200.0)
+	var absent: Dictionary = Inspect.read_property(node, "no_such_prop")
+	_eq(failures, "read.absent.exists", absent.get("exists"), false)
+	_eq(failures, "read.absent.value", absent.get("value"), null)
+	node.free()
+
+
+func _test_node_groups(failures: Array[String]) -> void:
+	# node_groups returns sorted plain-string memberships, excluding internal "_" groups (#216).
+	var node := Node2D.new()
+	node.add_to_group("spawnable")
+	node.add_to_group("enemies")
+	node.add_to_group("_internal")  # editor-internal — must be filtered out
+	_eq(failures, "groups", Inspect.node_groups(node), ["enemies", "spawnable"])
+	var bare := Node.new()
+	_eq(failures, "groups.empty", Inspect.node_groups(bare), [])
+	node.free()
+	bare.free()
+
+
+func _test_normalize_node_path(failures: Array[String]) -> void:
+	# Tolerates LLM-hallucinated absolute/`root/` prefixes; empty → "." (#244).
+	_eq(failures, "norm.root_abs", Inspect.normalize_node_path("/root/Player"), "Player")
+	_eq(failures, "norm.root_rel", Inspect.normalize_node_path("root/Player"), "Player")
+	_eq(failures, "norm.abs", Inspect.normalize_node_path("/Player"), "Player")
+	_eq(failures, "norm.empty", Inspect.normalize_node_path(""), ".")
+	_eq(failures, "norm.plain", Inspect.normalize_node_path("Player/Gun"), "Player/Gun")
+
+
+func _test_node_info(failures: Array[String]) -> void:
+	var root := Node2D.new()
+	root.name = "Root"
+	var player := CharacterBody2D.new()
+	player.name = "Player"
+	var sprite := Sprite2D.new()
+	sprite.name = "Sprite2D"
+	root.add_child(player)
+	player.add_child(sprite)
+
+	var info: Dictionary = Inspect.node_info(player, root)
+	_eq(failures, "info.node_path", info.get("node_path"), "Player")
+	_eq(failures, "info.type", info.get("type"), "CharacterBody2D")
+	_eq(failures, "info.children", info.get("children"), ["Sprite2D"])
+	# Root resolves to "." relative to itself.
+	_eq(failures, "info.root_path", Inspect.node_info(root, root).get("node_path"), ".")
+	root.free()
+
+
+func _test_snapshot_tree(failures: Array[String]) -> void:
+	# Issue #535: the snapshot shape = serialize_tree + per-node properties,
+	# with transforms and groups captured by default (review of PR #554).
+	var root := Node2D.new()
+	root.name = "Root"
+	var player := CharacterBody2D.new()
+	player.name = "Player"
+	player.set_script(Probe)
+	player.set("speed", 300.0)
+	player.position = Vector2(5, 6)
+	player.add_to_group("enemies")
+	root.add_child(player)
+
+	var snap: Dictionary = Inspect.snapshot_tree(root)
+	_eq(failures, "snap.path", snap.get("path"), ".")
+	# Default capture: transforms ride properties where the class exposes them;
+	# the bare root has no script vars, so its properties are transform-only.
+	var root_props: Dictionary = snap.get("properties", {})
+	_eq(failures, "snap.root.position", root_props.get("position"), {"x": 0.0, "y": 0.0})
+	_eq(failures, "snap.root.scale", root_props.get("scale"), {"x": 1.0, "y": 1.0})
+	_eq(failures, "snap.root.groups", snap.get("groups"), [])
+	var children: Array = snap.get("children")
+	if children.size() != 1:
+		failures.append("snap children wrong: %s" % str(children))
+	else:
+		_eq(failures, "snap.child.path", children[0].get("path"), "Player")
+		var player_props: Dictionary = children[0].get("properties", {})
+		_eq(failures, "snap.child.script_vars", player_props.get("speed"), 300.0)
+		_eq(failures, "snap.child.transform", player_props.get("position"), {"x": 5.0, "y": 6.0})
+		_eq(failures, "snap.child.groups", children[0].get("groups"), ["enemies"])
+		# JSON-safe: stringify must not error.
+		if JSON.stringify(snap) == "":
+			failures.append("snapshot is not JSON-safe")
+
+	# Requested extra built-in properties are captured (read_property semantics);
+	# an absent name is simply omitted, not an error.
+	var picked: Dictionary = Inspect.snapshot_tree(player, -1, ["modulate", "no_such_prop"], root)
+	_eq(failures, "snap.picked.path", picked.get("path"), "Player")
+	_eq(failures, "snap.picked.script_var", picked.get("properties", {}).get("speed"), 300.0)
+	# CharacterBody2D is a CanvasItem, so modulate exists and is captured.
+	_eq(failures, "snap.picked.modulate", picked.get("properties", {}).get("modulate"),
+		{"r": 1.0, "g": 1.0, "b": 1.0, "a": 1.0})
+	_eq(failures, "snap.picked.absent_omitted", picked.get("properties", {}).has("no_such_prop"), false)
+
+	# max_depth=0 ⇒ the node only, no children serialized.
+	var shallow: Dictionary = Inspect.snapshot_tree(root, 0)
+	_eq(failures, "snap.depth0", shallow.get("children"), [])
+
+	root.free()

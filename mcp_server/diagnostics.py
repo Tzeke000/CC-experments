@@ -1,0 +1,378 @@
+"""Diagnostics and capability-discovery tool.
+
+Provides a single ``get_server_info`` call that returns everything the client
+needs to understand the server's surface: toolsets, tool counts per category,
+prompts, resources, bridge state, Godot version, and common troubleshooting
+scenarios. Designed so an LLM can call it once at session start and build a
+complete mental model.
+"""
+
+from __future__ import annotations
+
+from fastmcp import FastMCP
+from pydantic import BaseModel
+
+from mcp_server import CONTRACT_VERSION, MIN_COMPATIBLE_CONTRACT, __version__
+from mcp_server.bridge import Bridge
+from mcp_server.categories import CORE_TAG
+from mcp_server.config import ServerConfig
+from mcp_server.safety import READ_ONLY
+from mcp_server.toolsets import ToolsetManager
+from mcp_server.updates import UpdateChecker, UpdateStatus
+from mcp_server.versions import version_notice
+
+
+class ToolsetSummary(BaseModel):
+    """Summary of one toolset for the diagnostics report."""
+
+    name: str
+    enabled: bool
+    description: str
+    tool_count: int
+    min_godot: str | None = None
+
+
+class BridgeDiagnostics(BaseModel):
+    """Bridge and editor state snapshot."""
+
+    connected: bool
+    url: str
+    godot_version: str | None = None
+    project_name: str | None = None
+    project_path: str | None = None
+    # Server↔addon handshake (issue #530, fixes #521): the connected addon's
+    # self-description from cmd_get_addon_info, lazily fetched + cached by
+    # Bridge.addon_info(). None when the addon predates the handshake or the
+    # query failed — surfaced as None, not an error, so older addons degrade
+    # gracefully.
+    addon_version: str | None = None
+    addon_commands: list[str] | None = None
+    # Peer identity (issue #537): the hello the connected editor announced at
+    # connect time (project_path / godot_version / addon_version). None when
+    # the peer predates the hello (older addon) — identity unknown, not an
+    # error. Distinct from cmd_get_project_info's response: this is who the
+    # server THINKS is attached, visible even before any command round-trip.
+    peer_identity: dict[str, str] | None = None
+    # Scripting backend capability (issue #207 Phase 1): what the connected
+    # editor + project support, so agents branch BEFORE authoring .cs.
+    # ``csharp_build`` is False until Phase 2 ships the build primitive.
+    backend: BackendDiagnostics | None = None
+
+
+class BackendDiagnostics(BaseModel):
+    """Scripting backend capability of the connected editor/project (issue #207)."""
+
+    csharp_supported: bool = False  # the editor is a .NET build (CSharpScript in ClassDB)
+    csharp_project: bool = False  # a .csproj exists in res://
+    csharp_build: bool = False  # Phase 2: the build primitive is not shipped yet
+
+
+class ServerDiagnostics(BaseModel):
+    """Complete server capability and health snapshot.
+
+    This is the authoritative response to ``get_server_info`` — it tells the
+    client everything about what is available, what is enabled, and how to fix
+    common problems.
+    """
+
+    server: str
+    version: str
+    # Contract/compat negotiation surface (#196), distinct from the CalVer
+    # `version`. A client is compatible when
+    # ``min_compatible_contract <= client_contract <= contract_version``.
+    contract_version: int
+    min_compatible_contract: int
+    transport: str
+    toolsets: list[ToolsetSummary]
+    prompts: list[str]
+    resources: list[str]
+    bridge: BridgeDiagnostics
+    active_scene: str | None = None
+    # Server↔addon drift (issue #530): a hint naming the bridge commands the
+    # connected addon does not register (None when in sync or handshake absent).
+    addon_drift_warning: str | None = None
+    # Server↔addon version mismatch (#629) — a direct compare that the command-drift
+    # proxy can miss (a version bump with no command change).
+    version_notice: str | None = None
+    # Update check (#629): the last result when GODOT_MCP_CHECK_UPDATES is enabled and
+    # a check has run, else None. Populated from ``godot_check_for_updates``'s cache.
+    update: UpdateStatus | None = None
+    common_errors: list[dict[str, str]]
+    next_steps: list[str]
+
+
+async def _count_tools_by_tag(mcp: FastMCP, tag: str) -> int:
+    """Count registered tools carrying a given category tag.
+
+    Uses the public ``mcp.local_provider.list_tools()`` (FastMCP 4.0), which
+    returns the full set including toolset-gated (disabled) tools — matching the
+    diagnostics contract that reports a toolset's total tool count regardless of
+    whether it is currently enabled.
+    """
+    count = 0
+    for tool in await mcp.local_provider.list_tools():
+        if tag in (getattr(tool, "tags", set())):
+            count += 1
+    return count
+
+
+async def _list_prompts(mcp: FastMCP) -> list[str]:
+    """Return names of all registered prompts via the public ``mcp.list_prompts()``."""
+    return [p.name for p in await mcp.list_prompts() if p.name]
+
+
+async def _list_resources(mcp: FastMCP) -> list[str]:
+    """Return URIs of all registered resources via the public ``mcp.list_resources()``.
+
+    Includes both static resources and resource templates: static resources
+    expose a concrete ``uri``; templates expose a ``uri_template``. The
+    capabilities snapshot merges both, so callers see the complete resource
+    surface advertised over the wire.
+    """
+    uris: list[str] = [str(r.uri) for r in await mcp.list_resources() if r.uri]
+    templates = await mcp.list_resource_templates()
+    uris.extend(t.uri_template for t in templates if t.uri_template)
+    return uris
+
+
+async def _fetch_bridge_diagnostics(bridge: Bridge) -> BridgeDiagnostics:
+    """Snapshot the bridge state and, if connected, query Godot for version/project.
+
+    Also pulls the addon handshake (issue #530) — the addon's version + live
+    command list — so the snapshot exposes the connected editor's identity and
+    makes a server↔addon drift visible (missing addon fields = pre-handshake
+    addon, which the client should read as "old addon, update it").
+    """
+    url_str = bridge.url
+    if not bridge.connected:
+        return BridgeDiagnostics(
+            connected=False,
+            url=url_str,
+            godot_version=None,
+            project_name=None,
+            project_path=None,
+            addon_version=None,
+            addon_commands=None,
+            peer_identity=None,
+            backend=None,
+        )
+    response = await bridge.send("cmd_get_project_info", timeout=3.0)
+    if response.ok and response.result:
+        result = response.result
+    else:
+        result = {}
+    # The handshake is best-effort: an unreachable/older addon leaves the fields
+    # None (Bridge.addon_info caches, so this costs one round-trip per peer).
+    addon_info = await bridge.addon_info() or {}
+    # Backend capability (#207 Phase 1): rides cmd_get_project_info; an older
+    # addon omits the probe — None = "unknown backend", never an error.
+    backend = None
+    if "csharp_supported" in result:
+        backend = BackendDiagnostics(
+            csharp_supported=bool(result.get("csharp_supported")),
+            csharp_project=bool(result.get("csharp_project")),
+            csharp_build=False,  # Phase 2 ships the build primitive
+        )
+    return BridgeDiagnostics(
+        connected=True,
+        url=url_str,
+        godot_version=result.get("godot_version"),
+        project_name=result.get("name"),
+        project_path=result.get("project_path"),
+        addon_version=addon_info.get("addon_version"),
+        addon_commands=addon_info.get("commands"),
+        peer_identity=bridge.peer_identity,
+        backend=backend,
+    )
+
+
+async def _fetch_active_scene(bridge: Bridge) -> str | None:
+    """Return the currently open scene path, or None."""
+    if not bridge.connected:
+        return None
+    response = await bridge.send("cmd_get_active_scene", timeout=3.0)
+    if response.ok and response.result:
+        result = response.result
+        if result.get("is_open"):
+            return result.get("path")
+    return None
+
+
+def _addon_drift_warning(
+    addon_commands: list[str] | None, bridge_commands: set[str]
+) -> str | None:
+    """A hint when the connected addon lacks bridge commands the server routes to.
+
+    Issue #530: without the handshake, a server↔addon version mismatch surfaced
+    as opaque per-command ``Unknown command`` VALIDATION_ERRORs. Here it becomes
+    a visible, self-diagnosing line in the capability snapshot. Only
+    single-bridge-command tools are compared (orchestrators run Python-side
+    logic and legitimately span several commands).
+    """
+    if not addon_commands:
+        return None
+    missing = sorted(bridge_commands - set(addon_commands))
+    if not missing:
+        return None
+    sample = ", ".join(missing[:5]) + (f" (+{len(missing) - 5} more)" if len(missing) > 5 else "")
+    return (
+        f"SERVER↔ADDON DRIFT: the connected addon does not register {len(missing)} "
+        f"command(s) the server exposes ({sample}). The addon is likely older than "
+        "the server (or vice versa). Update both sides to the same release: "
+        "pip-install the matching godot-editor-mcp and copy godot/addons/godot_mcp/ "
+        "from the same version."
+    )
+
+
+COMMON_ERRORS: list[dict[str, str]] = [
+    {
+        "symptom": "Tool '<name>' is not enabled",
+        "cause": "The toolset containing that tool is not enabled.",
+        "fix": "Call godot_list_toolsets, then godot_enable_toolset(\"scene_edit\") (or the "
+        "relevant category) before using the tool.",
+    },
+    {
+        "symptom": "BRIDGE_DISCONNECTED",
+        "cause": "Godot is not running or the addon is not enabled.",
+        "fix": "Open Godot with the project and enable the addon in Project Settings.",
+    },
+    {
+        "symptom": "PRECONDITION_FAILED: required=active_scene",
+        "cause": "No .tscn scene is open in the editor.",
+        "fix": "Open a scene file in Godot, or call godot_scene_edit_create_scene("
+        "root_type=…, scene_path=…) to make one (enable the scene_edit toolset first).",
+    },
+    {
+        "symptom": "PRECONDITION_FAILED: required=confirm",
+        "cause": "Destructive tool (godot_scene_edit_delete_node, "
+        "godot_scene_edit_reload_scene) needs explicit confirmation.",
+        "fix": "Add confirm=True to the call, or use dry_run=True to preview first.",
+    },
+    {
+        "symptom": "PRECONDITION_FAILED: required=play_session",
+        "cause": "Live runtime/input tools need an active editor play session.",
+        "fix": "Call play_scene() first, and ensure the runtime probe autoload is registered.",
+    },
+    {
+        "symptom": "PRECONDITION_FAILED: required=runtime_probe",
+        "cause": "The game was launched from the editor but lacks the MCPRuntimeProbe autoload.",
+        "fix": "Register MCPRuntimeProbe as an autoload in Project Settings.",
+    },
+    {
+        "symptom": "PRECONDITION_FAILED: required=godot_version",
+        "cause": "The connected Godot editor is older than the toolset's minimum.",
+        "fix": "Upgrade to Godot 4.4 or newer.",
+    },
+    {
+        "symptom": "RESOURCE_NOT_FOUND",
+        "cause": "A node, scene, script, or resource path does not exist.",
+        "fix": "Verify the path with get_scene_tree() or get_filesystem_tree() first.",
+    },
+]
+
+
+async def _build_toolset_summaries(mcp: FastMCP, manager: ToolsetManager) -> list[ToolsetSummary]:
+    """Build summaries with live tool counts for every known toolset."""
+    summaries: list[ToolsetSummary] = []
+    for info in manager.status():
+        summaries.append(
+            ToolsetSummary(
+                name=info.name,
+                enabled=info.enabled,
+                description=info.description,
+                tool_count=await _count_tools_by_tag(mcp, info.name),
+                min_godot=info.min_godot,
+            )
+        )
+    return summaries
+
+
+def _bridge_command_set() -> set[str]:
+    """The bridge commands the server's tool surface routes to (#530 drift check).
+
+    ``BARE_TO_COMMAND.values()`` is derived from the same registry data the tool
+    surface is registered with (cross-checked by tests/unit/test_command_map.py),
+    so it is the authoritative set of single-bridge-command tools. Orchestrators
+    (run_tests, export_project, ...) legitimately span several commands and are
+    excluded.
+    """
+    from mcp_server.command_map import BARE_TO_COMMAND
+
+    return set(BARE_TO_COMMAND.values())
+
+
+def _next_steps(
+    bridge_connected: bool,
+    active_scene: str | None,
+    update: UpdateStatus | None = None,
+) -> list[str]:
+    """Suggest what the agent should do based on current state."""
+    steps: list[str] = []
+    if update is not None and update.update_available:
+        steps.append(
+            f"A newer Godot Editor MCP release is available: {update.latest} (you are on "
+            f"{update.current}). Update the server and the Godot addon to the same "
+            "release (pip install -U godot-editor-mcp)."
+        )
+    if not bridge_connected:
+        steps.append(
+            "BRIDGE IS OFFLINE: Open Godot with the addon enabled, then retry. "
+            "The addon lives at godot/addons/godot_mcp/."
+        )
+        return steps
+    steps.append(
+        "Bridge is online. Call list_toolsets() then enable_toolset(...) "
+        "for the work you plan to do."
+    )
+    if active_scene is None:
+        steps.append("No scene is open. Open or create a scene before editing nodes.")
+    else:
+        steps.append(f"Active scene: {active_scene}. Ready for scene editing.")
+    steps.append("For live testing, register MCPRuntimeProbe as an autoload, then play_scene().")
+    return steps
+
+
+# -- registration -----------------------------------------------------------
+
+
+def register_diagnostics(
+    mcp: FastMCP,
+    bridge: Bridge,
+    config: ServerConfig,
+    manager: ToolsetManager,
+    checker: UpdateChecker | None = None,
+) -> None:
+    """Register the get_server_info diagnostics tool."""
+
+    @mcp.tool(meta=READ_ONLY, tags={CORE_TAG})
+    async def get_server_info() -> ServerDiagnostics:
+        """Return a comprehensive snapshot of the server's capabilities, toolsets,
+        prompts, bridge state, and common troubleshooting scenarios.
+
+        Use this at the **start of every session** to orient the agent:
+        it tells you which toolsets are available, how many tools each has,
+        whether Godot is connected, what scene is open, and what to do next.
+        """
+        bridge_diag = await _fetch_bridge_diagnostics(bridge)
+        active_scene = await _fetch_active_scene(bridge)
+        drift = _addon_drift_warning(
+            bridge_diag.addon_commands, _bridge_command_set()
+        )
+        update = checker.cached() if checker is not None else None
+        return ServerDiagnostics(
+            server="godot-mcp",
+            version=__version__,
+            contract_version=CONTRACT_VERSION,
+            min_compatible_contract=MIN_COMPATIBLE_CONTRACT,
+            transport=config.transport,
+            toolsets=await _build_toolset_summaries(mcp, manager),
+            prompts=await _list_prompts(mcp),
+            resources=await _list_resources(mcp),
+            bridge=bridge_diag,
+            active_scene=active_scene,
+            addon_drift_warning=drift,
+            version_notice=version_notice(__version__, bridge_diag.addon_version),
+            update=update,
+            common_errors=COMMON_ERRORS,
+            next_steps=_next_steps(bridge_diag.connected, active_scene, update),
+        )

@@ -1,0 +1,250 @@
+# export.py
+#
+# Copyright (C) 2026-present Goblend contributers, see https://github.com/Togira123/Goblend-Export-Addon
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>
+
+
+import bpy
+import subprocess
+
+from typing import cast
+
+from ..config import Paths
+
+from ..types.goblend_types import GoblendContext, SettingsForGodot, UvMapOverride
+
+from .handle_materials import handle_materials, check_convert_to_shader
+from .clean_up import clean_up
+from .setup import setup
+from ..utils import get_root_dir
+
+
+def handle_collision_shapes(collision_objects: set[tuple[bpy.types.Object, str]], paths: Paths) -> None:
+    collision_shapes = cast(GoblendContext, bpy.context).scene.panel_props.gltf_extension.collision_shapes
+    for val in collision_objects:
+        obj = val[0]
+        if "boxshape" in obj.name.lower():
+            coll_shape = collision_shapes.add()
+            coll_shape.type = "box"
+            coll_shape.parent_name = val[1]
+            coll_shape.object = obj
+            coll_shape.dimensions = [obj.dimensions[0], obj.dimensions[1], obj.dimensions[2]]
+        elif "cylshape" in obj.name.lower() or "cylindershape" in obj.name.lower():
+            coll_shape = collision_shapes.add()
+            coll_shape.type = "cylinder"
+            coll_shape.parent_name = val[1]
+            coll_shape.object = obj
+            coll_shape.height = obj.dimensions[2]
+            coll_shape.radius = obj.dimensions[0] / 2.0
+        elif "sphereshape" in obj.name.lower():
+            coll_shape = collision_shapes.add()
+            coll_shape.type = "sphere"
+            coll_shape.parent_name = val[1]
+            coll_shape.object = obj
+            coll_shape.radius = obj.dimensions[2] / 2.0
+        else:
+            coll_shape = collision_shapes.add()
+            coll_shape.type = "convcol"
+            coll_shape.parent_name = val[1]
+            coll_shape.object = obj
+
+
+def prep_for_export(
+    objects: list[bpy.types.Object],
+    found_col_objects: list[bpy.types.Object],
+    collision_objects: set[tuple[bpy.types.Object, str]],
+    collision_collection: bpy.types.Collection | None,
+    settings_for_godot: SettingsForGodot,
+    godot_scene_nodes: set[bpy.types.Object],
+    paths: Paths,
+) -> None:
+    # select all objects since we only export selected
+    for obj in objects:
+        obj.select_set(True)
+
+    # and also select objects that hold the collections for external libraries
+    # because we will later replace them with the scene instance in godot
+    for obj in found_col_objects:
+        obj.select_set(True)
+
+    # handle collision objects
+    handle_collision_shapes(collision_objects, paths)
+    # also select them
+    for val in collision_objects:
+        val[0].select_set(True)
+
+    # and select the godot_scene_nodes
+    for obj in godot_scene_nodes:
+        obj.select_set(True)
+
+    gltf_extension = bpy.context.scene.panel_props.gltf_extension
+
+    added_root_node = False
+
+    if collision_collection is not None:
+        for sett in settings_for_godot["collisions"]:
+            added_root_node = (
+                added_root_node or sett["collection"].name == bpy.context.scene.panel_props.collision_collection
+            )
+            physics_body = gltf_extension.physics_bodies.add()
+            physics_body.name = sett["collection"].name
+            physics_body.type = sett["type"]
+            if sett["layer_overrides"] is None:
+                for layer in settings_for_godot["default_collision_layers"]:
+                    new_layer = physics_body.layers.add()
+                    new_layer.value = int(layer)
+            else:
+                for layer in sett["layer_overrides"]:
+                    new_layer = physics_body.layers.add()
+                    new_layer.value = int(layer)
+
+            if sett["mask_overrides"] is None:
+                for mask in settings_for_godot["default_collision_masks"]:
+                    m = physics_body.masks.add()
+                    m.value = int(mask)
+            else:
+                for mask in sett["mask_overrides"]:
+                    m = physics_body.masks.add()
+                    m.value = int(mask)
+
+            if sett["group_overrides"] is None:
+                for group in settings_for_godot["default_groups"]:
+                    g = physics_body.groups.add()
+                    g.value = group
+            else:
+                for group in sett["group_overrides"]:
+                    g = physics_body.groups.add()
+                    g.value = group
+
+    # add root node if it does not exist yet
+    if not added_root_node:
+        root_physics_body = gltf_extension.physics_bodies.add()
+        root_physics_body.name = bpy.context.scene.panel_props.collision_collection
+        root_physics_body.type = settings_for_godot["default_physics_type"]
+        for layer in settings_for_godot["default_collision_layers"]:
+            new_layer = root_physics_body.layers.add()
+            new_layer.value = int(layer)
+        for mask in settings_for_godot["default_collision_masks"]:
+            m = root_physics_body.masks.add()
+            m.value = int(mask)
+        for group in settings_for_godot["default_groups"]:
+            g = root_physics_body.groups.add()
+            g.value = group
+
+    for sett in settings_for_godot["objects"]:
+        gltf_object = gltf_extension.objects.add()
+        gltf_object.name = sett["name"]
+        gltf_object.shadow_cast_mode = sett["shadow_cast_mode"]
+        if "layer_overrides" in sett:
+            for layer in sett["layer_overrides"]:
+                new_layer = gltf_object.render_layers.add()
+                new_layer.value = int(layer)
+        else:
+            for layer in settings_for_godot["default_render_layers"]:
+                new_layer = gltf_object.render_layers.add()
+                new_layer.value = int(layer)
+
+    # finally also add lights and curves
+    for obj in cast(bpy.types.Scene, bpy.context.scene).objects:
+        if (obj.type == "LIGHT" or obj.type == "CURVE") and not obj.hide_render and obj.library is None:
+            obj.hide_set(False)
+            obj.select_set(True)
+
+
+def export(
+    godot_exec_path: str,
+    texture_dim: dict[str, int],
+    uv_map_override: UvMapOverride,
+    bake_margins: dict[str, int],
+    texture_groups: dict[str, str],
+    texture_overrides: dict[str, list[int]],
+    settings_for_godot: SettingsForGodot,
+    paths: Paths,
+    process_linked_collections: bool,
+) -> None:
+    (
+        objects,
+        found_col_objects,
+        collision_objects,
+        collision_collection,
+        export_path_glb,
+        godot_scene_nodes,
+        selected_objects,
+        hidden_layer_collections,
+        hidden_objects,
+    ) = setup(texture_groups, settings_for_godot, process_linked_collections, paths)
+    (
+        extra_shader_nodes,
+        inputs,
+        created_tex_nodes_per_mat_per_obj,
+        old_meshes,
+        orig_mod_per_obj,
+        converted_mat_names,
+        images_created,
+    ) = handle_materials(
+        uv_map_override,
+        objects,
+        paths,
+        texture_groups,
+        settings_for_godot,
+        bake_margins,
+        texture_dim,
+        texture_overrides,
+    )
+
+    prep_for_export(
+        objects,
+        found_col_objects,
+        collision_objects,
+        collision_collection,
+        settings_for_godot,
+        godot_scene_nodes,
+        paths,
+    )
+
+    check_convert_to_shader(settings_for_godot, converted_mat_names, objects)
+
+    # export, apply remaining modifiers
+    bpy.ops.export_scene.gltf(
+        filepath=export_path_glb + bpy.context.scene.panel_props.gltf_extension.scene_name + ".gltf",
+        export_format="GLTF_SEPARATE",
+        use_selection=True,
+        export_lights=True,
+        export_apply=True,
+        export_keep_originals=True,
+        export_animation_mode="NLA_TRACKS",
+        export_pointer_animation=True,
+        export_convert_animation_pointer=True,
+        use_active_scene=True,
+    )
+
+    # import into godot
+    subprocess.run([godot_exec_path, "--path", get_root_dir(), "--headless", "--import"])
+
+    clean_up(
+        objects,
+        extra_shader_nodes,
+        inputs,
+        created_tex_nodes_per_mat_per_obj,
+        old_meshes,
+        orig_mod_per_obj,
+        images_created,
+        found_col_objects,
+        collision_objects,
+        export_path_glb,
+        selected_objects,
+        hidden_layer_collections,
+        hidden_objects,
+    )

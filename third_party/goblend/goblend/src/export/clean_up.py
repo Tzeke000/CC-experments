@@ -1,0 +1,149 @@
+# clean_up.py
+#
+# Copyright (C) 2026-present Goblend contributers, see https://github.com/Togira123/Goblend-Export-Addon
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>
+
+
+import bpy
+import os
+
+from ..types.goblend_types import ModifierData
+from typing import cast
+
+from ..utils import get_root_dir
+from ..log import log
+
+
+def clean_up(
+    objects: list[bpy.types.Object],
+    extra_shader_nodes: list[tuple[bpy.types.Node, bpy.types.Nodes]],
+    inputs: list[str],
+    created_tex_nodes_per_mat_per_obj: dict[
+        bpy.types.Object,
+        dict[
+            bpy.types.Material,
+            dict[str, tuple[bpy.types.ShaderNodeTexImage, bpy.types.NodeSocket, bpy.types.NodeSocket, bpy.types.Node]],
+        ],
+    ],
+    old_meshes: dict[bpy.types.Object, bpy.types.Mesh],
+    orig_mod_per_obj: dict[bpy.types.Object, list[ModifierData]],
+    images_created: set[bpy.types.Image],
+    found_col_objects: list[bpy.types.Object],
+    collision_objects: set[tuple[bpy.types.Object, str]],
+    export_path_glb: str,
+    selected_objects: list[bpy.types.Object],
+    hidden_layer_collections: set[bpy.types.LayerCollection],
+    hidden_objects: set[bpy.types.Object],
+) -> None:
+
+    # deselect afterwards
+    bpy.ops.object.select_all(action="DESELECT")
+
+    # make sure to remove the Image Texture node when done exporting
+    for d in extra_shader_nodes:
+        d[1].remove(d[0])
+
+    # restore original node links
+    for obj in objects:
+        for slot in obj.material_slots:
+            mat = slot.material
+            for inp in inputs:
+                if (
+                    obj in created_tex_nodes_per_mat_per_obj
+                    and mat in created_tex_nodes_per_mat_per_obj[obj]
+                    and inp in created_tex_nodes_per_mat_per_obj[obj][mat]
+                ):
+                    cast(bpy.types.ShaderNodeTree, mat.node_tree).links.new(
+                        created_tex_nodes_per_mat_per_obj[obj][mat][inp][2],
+                        created_tex_nodes_per_mat_per_obj[obj][mat][inp][1],
+                    )
+
+    # reapply old meshes for every object
+    for obj in objects:
+        orig_name = cast(bpy.types.Mesh, obj.data).name
+        cur_mesh = cast(bpy.types.Mesh, obj.data)
+        obj.data = old_meshes[obj]
+        bpy.data.meshes.remove(cur_mesh)
+        obj.data.name = orig_name
+        # set object as active
+        bpy.ops.object.select_all(action="DESELECT")
+        obj.select_set(True)
+        bpy.context.view_layer.objects.active = obj
+        # reapply all modifiers
+        for m in orig_mod_per_obj[obj]:
+            bpy.ops.object.modifier_add(type=m["type"])
+            mod = obj.modifiers[len(obj.modifiers) - 1]
+            mod.name = m["name"]
+            match m["type"]:
+                case "NODES":
+                    if "node_group" not in m:
+                        continue
+                    mod.node_group = m["node_group"]
+                    for identifier, val in m["props"].items():
+                        # geometry nodes modifier api changed in 5.2, see here: https://developer.blender.org/docs/release_notes/5.2/python_api/
+                        if bpy.app.version >= (5, 2, 0):
+                            if hasattr(mod.properties.inputs, identifier):
+                                getattr(mod.properties.inputs, identifier).value = val
+                            elif hasattr(mod.properties.outputs, identifier):
+                                getattr(mod.properties.outputs, identifier).value = val
+                        else:
+                            # old way of accessing modifier properties
+                            mod[identifier] = val
+
+    # remove the tmp_goblend_export directory
+
+    content = os.listdir(export_path_glb)
+    for file in content:
+        filepath = os.path.join(export_path_glb, file)
+        if os.path.isfile(filepath):
+            os.remove(filepath)
+        else:
+            log("Temporary directory contains other directories", "ERROR")
+
+    try:
+        os.rmdir(export_path_glb)
+    except Exception:
+        log("Failed to remove temporary export directory", "ERROR")
+
+    if bpy.context.scene.is_root_scene:
+        tmp_file_path = os.path.normcase(os.path.join(get_root_dir(), ".tmp.goblend"))
+        if os.path.isfile(tmp_file_path):
+            os.remove(tmp_file_path)
+
+    # clear cached image data blocks
+    for img in images_created:
+        bpy.data.images.remove(img)
+
+    # remove extra cubes that were created for linked collections
+    for obj in found_col_objects:
+        mesh = cast(bpy.types.Mesh, obj.data)
+        bpy.data.objects.remove(obj)
+        bpy.data.meshes.remove(mesh)
+
+    for val in collision_objects:
+        obj = val[0]
+        if obj.name.endswith("-convcolonly"):
+            obj.name = obj.name[:-12]  # remove the last 12 chars
+
+    bpy.ops.object.select_all(action="DESELECT")
+
+    for obj in selected_objects:
+        obj.select_set(True)
+
+    for coll in hidden_layer_collections:
+        coll.hide_viewport = True
+
+    for obj in hidden_objects:
+        obj.hide_set(True)

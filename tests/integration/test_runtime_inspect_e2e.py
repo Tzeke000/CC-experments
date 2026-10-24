@@ -1,0 +1,231 @@
+"""End-to-end runtime inspection test against a live editor (issue #35).
+
+On the #66 rails: build a scene with a Button, play it, then locate the live UI element
+and monitor a property over time via the runtime probe.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import subprocess
+from typing import Any
+
+import pytest
+
+from mcp_server.bridge import Bridge
+from mcp_server.config import BridgeConfig
+from tests.integration._godot import (
+    GODOT_BIN,
+    GODOT_PROJECT,
+    e2e_bridge_url,
+    needs_display,
+    serve_and_await_editor,
+)
+
+pytestmark = [
+    pytest.mark.skipif(GODOT_BIN is None, reason="Godot binary not installed"),
+    needs_display,
+]
+
+# Ephemeral per-run port (issue #444): no fixed port, so a concurrent
+# job's (or an orphaned) editor can never connect to this test's listener.
+BRIDGE_URL = e2e_bridge_url()
+SCRATCH = "res://tmp_e2e_runtime_inspect.tscn"
+SCRATCH_FILE = GODOT_PROJECT / "tmp_e2e_runtime_inspect.tscn"
+PROJECT_GODOT = GODOT_PROJECT / "project.godot"
+PROBE = "res://addons/godot_mcp/mcp_runtime_probe.gd"
+
+
+async def _ok(bridge: Bridge, command: str, params: dict[str, Any]) -> dict[str, Any]:
+    response = await bridge.send(command, params)
+    assert response.ok and response.result is not None, (
+        f"{command}: {response.error} {response.hint}"
+    )
+    return response.result
+
+
+async def _wait_scene_open(bridge: Bridge) -> None:
+    for _ in range(40):
+        r = await bridge.send("cmd_get_active_scene")
+        if r.ok and (r.result or {}).get("is_open"):
+            return
+        await asyncio.sleep(0.25)
+    raise AssertionError("scene did not open")
+
+
+async def _wait_connected(bridge: Bridge) -> None:
+    # The probe's first connection can lag several seconds behind the play
+    # command under editor cold-start/load.
+    for _ in range(60):
+        state = await _ok(bridge, "cmd_get_game_scene_tree", {})
+        if state.get("connected"):
+            return
+        await asyncio.sleep(0.5)
+    raise AssertionError("probe never connected")
+
+
+async def _poll(bridge: Bridge, command: str, params: dict[str, Any]) -> dict[str, Any]:
+    # The played game under a headless editor's debug session was measured at
+    # ~1 fps (probe perf: fps=1, process_time≈1000ms) — a 5-frame capture takes
+    # ~5-8s; 6s was marginal and failed under boot-time jitter. 90 x 0.2s = 18s
+    # covers the observed cadence with headroom; ready replies still return
+    # immediately. (The 1fps cadence itself is tracked in #582's follow-up.)
+    for _ in range(90):
+        r = await _ok(bridge, command, params)
+        if r.get("ready"):
+            return r
+        await asyncio.sleep(0.2)
+    raise AssertionError(f"{command} never became ready")
+
+
+async def _run() -> None:
+    bridge = Bridge(BridgeConfig(url=BRIDGE_URL))
+    if not await serve_and_await_editor(bridge):
+        raise AssertionError("the addon never connected to the bridge")
+
+    try:
+        # build a scene with a Button, then save it so the played process loads it
+        await _ok(bridge, "cmd_create_scene", {"root_type": "Node2D", "scene_path": SCRATCH})
+        await _wait_scene_open(bridge)
+        await _ok(
+            bridge, "cmd_create_node", {"parent_path": ".", "node_type": "Button", "name": "Start"}
+        )
+        await _ok(
+            bridge,
+            "cmd_set_node_property",
+            {"node_path": "Start", "property": "text", "value": "Play"},
+        )
+        await _ok(bridge, "cmd_save_scene", {})
+
+        # precondition: inspection with no play session is a structured error
+        no_session = await bridge.send(
+            "cmd_monitor_property", {"node_path": "/root/x", "property": "position"}
+        )
+        assert no_session.ok is False and no_session.error == "PRECONDITION_FAILED"
+
+        await _ok(bridge, "cmd_register_autoload", {"name": "GodotMcpProbe", "path": PROBE})
+        await _ok(bridge, "cmd_play_scene", {"scene_path": SCRATCH})
+        await _wait_connected(bridge)
+
+        # find the live Button (with text + rect); request_id is stable across the poll
+        found = await _poll(
+            bridge, "cmd_find_ui_elements", {"class_filter": "Button", "request_id": "e2e-find-1"}
+        )
+        buttons = [e for e in found["elements"] if e["name"] == "Start"]
+        assert buttons, f"Start button not found in {found['elements']}"
+        button = buttons[0]
+        assert button["node_class"] == "Button"
+        assert button["text"] == "Play"
+        assert "rect" in button and button["visible"] is True
+
+        # monitor a property over time on that live node. on_change_only=False
+        # pins legacy every-frame sampling so the series has exactly `samples`
+        # entries (a static position would dedupe to fewer under the #536 default).
+        await _ok(
+            bridge,
+            "cmd_monitor_property",
+            {
+                "node_path": button["path"],
+                "property": "position",
+                "samples": 5,
+                "on_change_only": False,
+            },
+        )
+        samples = await _poll(bridge, "cmd_get_property_samples", {})
+        assert samples["error"] == ""
+        assert len(samples["samples"]) == 5
+        assert "value" in samples["samples"][0]
+
+        # #536: the dedup default collapses a static property to one sample.
+        await _ok(
+            bridge,
+            "cmd_monitor_property",
+            {"node_path": button["path"], "property": "position", "samples": 5},
+        )
+        dedup = await _poll(bridge, "cmd_get_property_samples", {})
+        assert dedup["error"] == ""
+        assert len(dedup["samples"]) < 5, "static property must dedupe under on_change_only"
+        assert dedup.get("dropped_duplicates", 0) >= 4
+
+        # monitoring an invalid property reports an error (not a crash)
+        await _ok(
+            bridge,
+            "cmd_monitor_property",
+            {"node_path": button["path"], "property": "no_such_property_xyz", "samples": 3},
+        )
+        bad = await _poll(bridge, "cmd_get_property_samples", {})
+        assert bad["error"] != ""
+
+        # #571: a one-shot read DURING a running capture must not replace it.
+        # Start a legacy every-frame capture (10 frames — at the debug session's
+        # ~1 fps cadence a frame costs ~1s; keep the budget bounded)…
+        await _ok(
+            bridge,
+            "cmd_monitor_property",
+            {"node_path": button["path"], "property": "position", "samples": 10,
+             "on_change_only": False},
+        )
+        # …read a different property one-shot mid-capture…
+        one_shot = await _poll(
+            bridge,
+            "cmd_read_property",
+            {"node_path": button["path"], "property": "text", "request_id": "e2e-read-1"},
+        )
+        assert one_shot["error"] == ""
+        assert one_shot["value"] == "Play"
+        # …and the capture keeps collecting ITS series (not the one-shot's).
+        series = await _poll(bridge, "cmd_get_property_samples", {})
+        assert series["error"] == ""
+        assert series["property"] == "position", (
+            f"#571: one-shot read clobbered the capture: {series.get('property')}"
+        )
+        assert series["node_path"] == button["path"]
+        assert len(series["samples"]) >= 2, "capture must still be sampling past the one-shot"
+
+        # the one-shot read errors are structured, not crashes
+        bad_read = await _poll(
+            bridge,
+            "cmd_read_property",
+            {
+                "node_path": button["path"],
+                "property": "no_such_prop_xyz",
+                "request_id": "e2e-read-2",
+            },
+        )
+        assert bad_read["error"] != ""
+
+        # Qodo review (#575): a reply to an OLDER request must never serve as
+        # the current one — a second invocation with a fresh request_id reads
+        # its own reply (the debugger gates the cache on the pending id).
+        second = await _poll(
+            bridge,
+            "cmd_read_property",
+            {"node_path": button["path"], "property": "text", "request_id": "e2e-read-3"},
+        )
+        assert second["error"] == "" and second["value"] == "Play"
+
+        await _ok(bridge, "cmd_stop_scene", {})
+    finally:
+        await bridge.close()
+
+
+def test_live_runtime_inspect() -> None:
+    assert GODOT_BIN is not None
+    snapshot = PROJECT_GODOT.read_bytes()
+    editor = subprocess.Popen(
+        [GODOT_BIN, "--headless", "--editor", "--path", str(GODOT_PROJECT)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env={**os.environ, "GODOT_MCP_BRIDGE_URL": BRIDGE_URL},
+    )
+    try:
+        asyncio.run(_run())
+    finally:
+        editor.terminate()
+        try:
+            editor.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            editor.kill()
+        SCRATCH_FILE.unlink(missing_ok=True)
+        PROJECT_GODOT.write_bytes(snapshot)

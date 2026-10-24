@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# graphify graph auto-refresh on commit (issue #174; #656 — portable + single-run).
+#
+# Delegates to the shared, self-contained refresher (_graphify_refresh.sh):
+# AST-only, LLM-free, best-effort. Deliberately does NOT ship a vendored
+# "graphify hook install" block — that variant hardcoded a machine-specific
+# python path (/Users/...) and rebuilt the graph a second time. See
+# .opencode/rules/graphify.md.
+exec "$(git rev-parse --show-toplevel)/scripts/hooks/_graphify_refresh.sh" post-commit

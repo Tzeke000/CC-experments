@@ -1,0 +1,69 @@
+# GodotScenePanelProperties.py
+#
+# Copyright (C) 2026-present Goblend contributers, see https://github.com/Togira123/Goblend-Export-Addon
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>
+
+
+import bpy
+
+from ... import config as conf
+from ... import utils
+from ...types.property_types import typed_prop_group, BoolProp, PointerProp, EnumProp
+
+
+def is_godot_scene(self: bpy.types.PropertyGroup, obj: bpy.types.Object) -> bool:
+    scene = bpy.context.scene
+    for item in scene.godot_scene_panel_props:
+        if obj == item.obj:
+            return False
+    # this is much slower than a simple bpy.data.collections.get(bpy.context.scene.panel_props.godot_scenes_collection),
+    # but it only includes collections of the current scene
+    # it shouldn't matter too much with a low collection count
+    all_collections_in_scene = bpy.context.scene.collection.children_recursive
+    godot_scenes = None
+    for coll in all_collections_in_scene:
+        if coll.name == bpy.context.scene.panel_props.godot_scenes_collection:
+            godot_scenes = coll
+            break
+    if not godot_scenes:
+        return False
+    return obj.name in godot_scenes.objects
+
+
+def scenes(_self: bpy.types.PropertyGroup, _context: bpy.types.Context | None) -> list[tuple[str, str, str]]:
+    if len(utils.godot_scene_panel_props_enum_cache) == 0:
+        config = conf.get_config()
+        for scene in config["godot_scenes"]:
+            utils.godot_scene_panel_props_enum_cache.append(
+                (scene["name"], scene["display_name"], "Godot Scene at: " + scene["godot_scene_path"])
+            )
+
+    return utils.godot_scene_panel_props_enum_cache
+
+
+@typed_prop_group
+class GodotScenePanelProperties(bpy.types.PropertyGroup):
+    open = BoolProp(default=True)
+    obj = PointerProp(
+        name="Target Object",
+        description="The object to be replaced with the scene.",
+        type=bpy.types.Object,
+        poll=is_godot_scene,
+    )
+    scene = EnumProp(
+        name="Scene",
+        description="The Godot Scene to place at the object's position. Use the config file to register more scenes.",
+        items=scenes,
+    )

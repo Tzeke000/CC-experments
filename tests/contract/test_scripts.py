@@ -1,0 +1,357 @@
+"""Contract tests for the script read/patch tools (issue #10).
+
+In-memory client + fake addon peer + injected fake runner (for parse checks).
+"""
+
+from __future__ import annotations
+
+import pytest
+from fastmcp import Client, FastMCP
+
+from mcp_server.bridge import Bridge
+from mcp_server.config import ServerConfig
+from mcp_server.models.envelope import CommandEnvelope, ResponseEnvelope
+from mcp_server.runtime import RunOutput
+from mcp_server.scripts_parse import parse_check_errors
+from mcp_server.server import create_server
+from tests.fakes import FakeAddonConnection, connector_for
+
+# asyncio_mode=auto runs the async tests; no module-wide mark (it would warn on the
+# synchronous parser test below).
+
+
+def _responder(cmd: CommandEnvelope) -> ResponseEnvelope | None:
+    p = cmd.params
+    match cmd.command:
+        case "cmd_read_script":
+            if p.get("script_path") == "res://missing.gd":
+                return ResponseEnvelope.failure(cmd.id, "RESOURCE_NOT_FOUND", "No script.")
+            return ResponseEnvelope.success(
+                cmd.id, {"script_path": p["script_path"], "content": "extends Node\n"}
+            )
+        case "cmd_list_scripts":
+            return ResponseEnvelope.success(
+                cmd.id, {"directory": p["directory"], "scripts": ["res://a.gd", "res://b.gd"]}
+            )
+        case "cmd_get_script_for_node":
+            return ResponseEnvelope.success(
+                cmd.id, {"node_path": p["node_path"], "script_path": None, "content": None}
+            )
+        case "cmd_write_script":
+            return ResponseEnvelope.success(
+                cmd.id, {"script_path": p["script_path"], "created": True}
+            )
+        case "cmd_patch_script":
+            return ResponseEnvelope.success(
+                cmd.id, {"script_path": p["script_path"], "replacements": 2}
+            )
+    return ResponseEnvelope.failure(cmd.id, "VALIDATION_ERROR", "unexpected")
+
+
+class _FakeRunner:
+    binary: str | None = "fake-godot"
+
+    def __init__(self, check_output: RunOutput) -> None:
+        self._check = check_output
+
+    async def run(self, project_dir: str, scene: str | None, timeout: float) -> RunOutput:
+        return RunOutput(command=["fake"])
+
+    async def check_shader(self, project_dir: str, shader_path: str, timeout: float) -> RunOutput:
+        return RunOutput(command=["fake"])
+
+    async def check_script(self, project_dir: str, script_path: str, timeout: float) -> RunOutput:
+        return self._check
+
+    async def export(
+        self, project_dir: str, preset: str, output_path: str, debug: bool, timeout: float
+    ) -> RunOutput:
+        return RunOutput(command=["fake"])
+
+    async def run_tests(self, project_dir: str, test_dir: str, timeout: float) -> RunOutput:
+        return RunOutput(command=["fake"])
+
+
+def _build(check_output: RunOutput | None = None) -> tuple[FastMCP, FakeAddonConnection]:
+    conn = FakeAddonConnection(responder=_responder)
+    config = ServerConfig(godot_project_dir="/tmp/proj")
+    bridge = Bridge(config.bridge, connector=connector_for(conn))
+    runner = _FakeRunner(check_output or RunOutput(command=["fake"]))
+    return create_server(config, bridge=bridge, runner=runner), conn
+
+
+def test_parse_check_errors_extracts_line() -> None:
+    text = (
+        'SCRIPT ERROR: Parse Error: Expected expression after "=".\n'
+        "          at: GDScript::reload (res://player.gd:3)\n"
+        'ERROR: Failed to load script with error "Parse error".'
+    )
+    errors = parse_check_errors(text)
+    assert len(errors) == 1
+    assert errors[0].source == "res://player.gd"
+    assert errors[0].line == 3
+    assert "Expected expression" in errors[0].message
+
+
+def test_parse_check_errors_ignores_non_parse_script_errors() -> None:
+    # A non-parse SCRIPT ERROR (no "Parse Error:") must not be reported as a parse error.
+    text = 'SCRIPT ERROR: Invalid call. Nonexistent function "foo".\n   at: (res://a.gd:9)'
+    assert parse_check_errors(text) == []
+
+
+async def test_script_tools_gated_in_scripts_toolset() -> None:
+    server, _ = _build()
+    async with Client(server, mode="legacy") as client:
+        assert "godot_scripts_read" not in {t.name for t in await client.list_tools()}
+        await client.call_tool("godot_enable_toolset", {"category": "scripts"})
+        names = {t.name for t in await client.list_tools()}
+    assert {
+        "godot_scripts_read",
+        "godot_scripts_write",
+        "godot_scripts_patch",
+        "godot_scripts_get_parse_errors",
+    } <= names
+
+
+async def test_read_and_list_scripts() -> None:
+    server, _ = _build()
+    async with Client(server) as client:
+        await client.call_tool("godot_enable_toolset", {"category": "scripts"})
+        content = await client.call_tool("godot_scripts_read", {"script_path": "res://a.gd"})
+        listing = await client.call_tool("godot_scripts_list", {"directory": "res://"})
+    assert content.structured_content["content"] == "extends Node\n"
+    assert listing.structured_content["scripts"] == ["res://a.gd", "res://b.gd"]
+
+
+async def test_write_script_safety_and_dry_run() -> None:
+    server, conn = _build()
+    async with Client(server) as client:
+        await client.call_tool("godot_enable_toolset", {"category": "scripts"})
+        tool = next(t for t in await client.list_tools() if t.name == "godot_scripts_write")
+        assert tool.meta is not None and tool.meta.get("safety_class") == "mutating"
+        # Existing target (the fake reads it back) -> would_overwrite, not created.
+        dry = await client.call_tool(
+            "godot_scripts_write",
+            {"script_path": "res://x.gd", "content": "extends Node", "dry_run": True},
+        )
+        # Missing target -> not an overwrite; would be created.
+        dry_new = await client.call_tool(
+            "godot_scripts_write",
+            {"script_path": "res://missing.gd", "content": "extends Node", "dry_run": True},
+        )
+    assert dry.structured_content["dry_run"] is True
+    assert dry.structured_content["would_overwrite"] is True
+    assert dry.structured_content["created"] is False
+    # #424 round-2 review: the preview must state the file's existence too — the
+    # tool sets previous_existed; the serializer must not drop it.
+    assert dry.structured_content["previous_existed"] is True
+    assert dry_new.structured_content["would_overwrite"] is False
+    assert dry_new.structured_content["previous_existed"] is False
+    assert dry_new.structured_content["created"] is True
+    sent = [CommandEnvelope.model_validate_json(s).command for s in conn.sent]
+    assert "cmd_write_script" not in sent  # dry-run writes nothing
+
+
+async def test_write_script_rejects_res_root_escape() -> None:
+    from fastmcp.exceptions import ToolError
+
+    server, conn = _build()
+    async with Client(server) as client:
+        await client.call_tool("godot_enable_toolset", {"category": "scripts"})
+        with pytest.raises(ToolError):
+            await client.call_tool(
+                "godot_scripts_write", {"script_path": "res://../../etc/x.gd", "content": "x"}
+            )
+    sent = [CommandEnvelope.model_validate_json(s).command for s in conn.sent]
+    assert "cmd_write_script" not in sent  # rejected before reaching the addon
+
+
+async def test_write_script_overwrite_reports_the_effect() -> None:
+    """#424: a real overwrite must read as success — ``created:false, overwrote:true,
+    previous_existed:true``. ``would_overwrite`` is dry-run-only phrasing; the real
+    response must not read like a no-op while the bytes landed."""
+    def responder(cmd: CommandEnvelope) -> ResponseEnvelope | None:
+        if cmd.command == "cmd_write_script":
+            return ResponseEnvelope.success(
+                cmd.id,
+                {"script_path": cmd.params["script_path"], "created": False,
+                 "overwrote": True, "previous_existed": True},
+            )
+        return ResponseEnvelope.failure(cmd.id, "VALIDATION_ERROR", "unexpected")
+
+    conn = FakeAddonConnection(responder=responder)
+    bridge = Bridge(ServerConfig().bridge, connector=connector_for(conn))
+    server = create_server(ServerConfig(), bridge=bridge)
+    async with Client(server) as client:
+        await client.call_tool("godot_enable_toolset", {"category": "scripts"})
+        result = await client.call_tool(
+            "godot_scripts_write", {"script_path": "res://x.gd", "content": "extends Node"}
+        )
+    sc = result.structured_content
+    assert sc["created"] is False
+    assert sc["overwrote"] is True
+    assert sc["previous_existed"] is True
+    # The misleading key must not appear on a real run (dry_run keeps its probe form).
+    assert "would_overwrite" not in sc
+
+
+async def test_write_script_legacy_addon_payload_maps_to_effect_truth() -> None:
+    """#424 round-2 (version skew): a legacy addon that still replies
+    ``{created:false, would_overwrite:true}`` must not serialize as
+    ``overwrote:false`` while the bytes landed — the parsed probe key maps to
+    the effect keys on a real run."""
+    def responder(cmd: CommandEnvelope) -> ResponseEnvelope | None:
+        if cmd.command == "cmd_write_script":
+            return ResponseEnvelope.success(
+                cmd.id,
+                {"script_path": cmd.params["script_path"], "created": False,
+                 "would_overwrite": True},
+            )
+        return ResponseEnvelope.failure(cmd.id, "VALIDATION_ERROR", "unexpected")
+
+    conn = FakeAddonConnection(responder=responder)
+    bridge = Bridge(ServerConfig().bridge, connector=connector_for(conn))
+    server = create_server(ServerConfig(), bridge=bridge)
+    async with Client(server) as client:
+        await client.call_tool("godot_enable_toolset", {"category": "scripts"})
+        result = await client.call_tool(
+            "godot_scripts_write", {"script_path": "res://x.gd", "content": "extends Node"}
+        )
+    sc = result.structured_content
+    assert sc["overwrote"] is True
+    assert sc["previous_existed"] is True
+    assert sc["created"] is False
+
+
+async def test_write_script_dry_run_does_not_bypass_containment() -> None:
+    # A dry-run must validate the path BEFORE probing existence, so an escaped path
+    # can't read a file outside the project via cmd_read_script (Qodo #209).
+    from fastmcp.exceptions import ToolError
+
+    server, conn = _build()
+    async with Client(server) as client:
+        await client.call_tool("godot_enable_toolset", {"category": "scripts"})
+        with pytest.raises(ToolError):
+            await client.call_tool(
+                "godot_scripts_write",
+                {"script_path": "res://../../etc/passwd", "content": "x", "dry_run": True},
+            )
+    sent = [CommandEnvelope.model_validate_json(s).command for s in conn.sent]
+    assert "cmd_read_script" not in sent  # probe never fired for the escaped path
+
+
+def test_write_script_create_undo_removes_uid_sidecar() -> None:
+    # Undoing a freshly-created script must clean its .uid sidecar — pin the wiring
+    # so it can't silently regress to _remove_file (Qodo #209). The handler needs
+    # EditorInterface/UndoRedo, so the actual undo isn't exercisable headless; this
+    # asserts the create-undo branch wires the uid-aware remover.
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[2] / "godot/addons/godot_mcp/handlers/scripts.gd"
+    func = src.read_text(encoding="utf-8").split("func _cmd_write_script", 1)[1]
+    body = func.split("\nfunc ", 1)[0]  # just the _cmd_write_script body
+    assert 'add_undo_method(_router, "_remove_file_with_uid", path)' in body
+    assert 'add_undo_method(_router, "_remove_file", path)' not in body
+
+
+async def test_patch_script_routes() -> None:
+    server, _ = _build()
+    async with Client(server) as client:
+        await client.call_tool("godot_enable_toolset", {"category": "scripts"})
+        result = await client.call_tool(
+            "godot_scripts_patch", {"script_path": "res://a.gd", "find": "foo", "replace": "bar"}
+        )
+    assert result.structured_content["replacements"] == 2
+
+
+async def test_get_parse_errors_reports_structured_errors() -> None:
+    check = RunOutput(
+        command=["fake"],
+        stderr="SCRIPT ERROR: Parse Error: bad\n   at: GDScript::reload (res://a.gd:5)",
+    )
+    server, _ = _build(check_output=check)
+    async with Client(server) as client:
+        await client.call_tool("godot_enable_toolset", {"category": "scripts"})
+        result = await client.call_tool(
+            "godot_scripts_get_parse_errors", {"script_path": "res://a.gd"}
+        )
+    payload = result.structured_content
+    assert payload["ok"] is False
+    assert payload["errors"][0]["line"] == 5
+
+
+async def test_get_parse_errors_waits_for_editor_scan() -> None:
+    """The tool must consult the editor's scan state before parsing (#453): it
+    polls cmd_get_scan_state, and only reports rescan_pending=true when the
+    scan is STILL in flight after the bounded budget (a quiet editor parses
+    immediately with rescan_pending=false)."""
+    check = RunOutput(
+        command=["fake"],
+        stderr="SCRIPT ERROR: Parse Error: bad\n   at: GDScript::reload (res://a.gd:5)",
+    )
+    # Simulate: the first two polls report scanning, then it goes quiet.
+    state = {"scans": [True, True, False, False, False, False, False, False, False, False]}
+
+    def responder(cmd: CommandEnvelope) -> ResponseEnvelope | None:
+        if cmd.command == "cmd_get_scan_state":
+            scanning = state["scans"].pop(0) if len(state["scans"]) > 1 else False
+            return ResponseEnvelope.success(cmd.id, {"scanning": scanning})
+        return _responder(cmd)
+
+    conn = FakeAddonConnection(responder=responder)
+    config = ServerConfig(godot_project_dir="/tmp/proj")
+    bridge = Bridge(config.bridge, connector=connector_for(conn))
+    runner = _FakeRunner(check_output=check)
+    server = create_server(config, bridge=bridge, runner=runner)
+    async with Client(server) as client:
+        await client.call_tool("godot_enable_toolset", {"category": "scripts"})
+        result = await client.call_tool(
+            "godot_scripts_get_parse_errors", {"script_path": "res://a.gd"}
+        )
+    payload = result.structured_content
+    # The scan went quiet within budget → rescan_pending stays false.
+    assert payload["rescan_pending"] is False
+    # The fake saw the poll before the check ran.
+    assert "cmd_get_scan_state" in [
+        CommandEnvelope.model_validate_json(s).command for s in conn.sent
+    ]
+
+
+async def test_get_parse_errors_reports_rescan_pending_when_scan_stuck() -> None:
+    """A scan that never finishes within the bounded budget stamps
+    rescan_pending=true on the result — the agent then knows a fresh-class_name
+    'Could not find type' error may be stale cache, not a real parse error (#453)."""
+    check = RunOutput(
+        command=["fake"],
+        stderr='SCRIPT ERROR: Parse Error: Could not find type "Enemy" (res://a.gd:3)',
+    )
+
+    def stuck_responder(cmd: CommandEnvelope) -> ResponseEnvelope | None:
+        if cmd.command == "cmd_get_scan_state":
+            return ResponseEnvelope.success(cmd.id, {"scanning": True})
+        return _responder(cmd)
+
+    conn = FakeAddonConnection(responder=stuck_responder)
+    config = ServerConfig(godot_project_dir="/tmp/proj")
+    bridge = Bridge(config.bridge, connector=connector_for(conn))
+    runner = _FakeRunner(check_output=check)
+    server = create_server(config, bridge=bridge, runner=runner)
+    async with Client(server) as client:
+        await client.call_tool("godot_enable_toolset", {"category": "scripts"})
+        result = await client.call_tool(
+            "godot_scripts_get_parse_errors", {"script_path": "res://a.gd"}
+        )
+    payload = result.structured_content
+    assert payload["rescan_pending"] is True
+    assert payload["ok"] is False
+
+
+async def test_missing_script_is_structured_error() -> None:
+    server, _ = _build()
+    async with Client(server) as client:
+        await client.call_tool("godot_enable_toolset", {"category": "scripts"})
+        result = await client.call_tool(
+            "godot_scripts_read", {"script_path": "res://missing.gd"}, raise_on_error=False
+        )
+    assert result.is_error
+    assert "RESOURCE_NOT_FOUND" in str(result.content)

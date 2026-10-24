@@ -1,0 +1,41 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Godot addon release zip (built by publish.yml, not committed)
+addon_dist/
+
+# Separate nested clone of the wiki-fabric project (not part of this repo)
+wiki-fabric/
+
+# uv
+# uv.lock IS committed (reproducible dev bootstrap)
+
+# Godot
+godot/.godot/
+examples/**/.godot/
+fixtures/**/.godot/
+**/.godot/
+*.import
+
+# OS / editor
+.DS_Store
+.env
+
+# graphify generated knowledge graph (regenerable output + cache)
+graphify-out/
+
+# forge codebase-index artifacts (regenerable)
+.forge/
+
+# mkdocs site output
+
+# docs site (VitePress)
+docs/site/node_modules/

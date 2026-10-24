@@ -1,0 +1,112 @@
+---
+type: index
+title: "Environment variables"
+description: "Every configuration knob on both the server and the addon."
+created: 2026-09-19
+updated: 2026-09-23
+---
+
+# Environment variables
+
+All knobs are optional; the defaults serve a local single-user setup.
+
+## Server
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `GODOT_MCP_TRANSPORT` | `stdio` | `stdio` or `http` |
+| `GODOT_MCP_HTTP_HOST` | `127.0.0.1` | HTTP bind host |
+| `GODOT_MCP_HTTP_PORT` | `9090` | HTTP bind port (`/mcp` is FastMCP's mount path) |
+| `GODOT_MCP_AUTH_TOKEN` | unset | Bearer token; **required** for non-loopback HTTP binds (fail-fast, #226) |
+| `GODOT_MCP_HTTP_HOST_ORIGIN_PROTECTION` | `auto` | HTTP Host/Origin (DNS-rebinding) guard (#636): `auto` validates the `Host` header + browser `Origin` for a loopback-bound server (foreign `Host` → `421`, foreign `Origin` → `403`); `false` opts out; `true`/`strict` validates every request |
+| `GODOT_MCP_BRIDGE_URL` | `ws://127.0.0.1:9080` | bridge listen (server) / connect (addon) URL |
+| `GODOT_MCP_BRIDGE_TOKEN` | unset | opt-in shared secret for the bridge handshake (#538) — when set, the addon must send the matching token as its first message or the peer is refused at the handshake; never logged |
+| `GODOT_MCP_PROJECT_DIR` | unset | explicit project dir; else the connected editor's project is used |
+| `GODOT_MCP_DEFAULT_TOOLSETS` | unset (= `inspection`) | seed the initial enabled toolsets: `all` or a comma-separated list (e.g. `scene_edit,runtime`); unknown names are logged and ignored |
+| `GODOT_MCP_GODOT_BIN` | `godot` on PATH | the Godot binary the *server* shells out to for headless runs and parse/compile checks (distinct from the addon's editor; also settable as `GODOT_BIN` on CI) |
+| `GODOT_MCP_LOG_LEVEL` | `INFO` | structured stderr logging level (JSON per line) |
+| `GODOT_MCP_APPROVAL_WEBHOOK` | unset | human-in-the-loop approval endpoint for `destructive` tools (#153); unset → auto-approve |
+| `GODOT_MCP_APPROVAL_TIMEOUT` | `30.0` | per-approval-request timeout, seconds |
+| `GODOT_MCP_APPROVAL_FAIL_OPEN` | `false` | on an unreachable/slow webhook: `false` **denies** (fail closed, #638), `true` approves |
+| `GODOT_MCP_APPROVAL_REQUIRE` | `false` | guard-pattern approval (elicitation) when no webhook is configured (#346) |
+| `GODOT_MCP_CONSENT_SECRET` | random per process | HMAC key for `godot_describe_tool` consent tokens (#759); set it to keep tokens valid across restarts |
+| `GODOT_MCP_CHECK_UPDATES` | unset (= off) | opt-in update check (#629): when set (`1`/`true`/`yes`) the server may query the release feed so `godot_check_for_updates` can report a newer release; unset = no network |
+
+## Addon (read in the editor's environment)
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `GODOT_MCP_BRIDGE_URL` | `ws://127.0.0.1:9080` | where the addon dials the server (same var as the server) |
+| `GODOT_MCP_BRIDGE_TOKEN` | unset | the same opt-in secret as the server — the addon authenticates with it as its first message after connecting; never logged |
+| `GODOT_MCP_AUTO_REFRESH` | unset (= off) | opt-in timer-based filesystem auto-refresh (#561): `1`/`true`/`yes` enables a periodic `EditorFileSystem.scan()` so external edits (agents, git, other tools) show up without editor focus; the dock checkbox is the runtime override |
+| `GODOT_MCP_AUTO_REFRESH_INTERVAL` | `10` | seconds between auto-refresh scans (floor 2s; only read when `GODOT_MCP_AUTO_REFRESH` is on) |
+| `GODOT_BIN` | `godot` on PATH | where a *CI workflow* points the server's binary lookup (`e2e.yml` Actions var) — the server itself reads `GODOT_MCP_GODOT_BIN`, then `godot`/`Godot` on PATH, then the macOS app bundle |
+
+## Security model
+
+| Mode | Bind | Auth | Why |
+|------|------|------|-----|
+| `stdio` (default) | N/A (local subprocess) | none | only the spawning client can talk to it |
+| `http` on loopback | `127.0.0.1` | none | only local processes reach it |
+| `http` non-loopback | `0.0.0.0` / external IP | **`GODOT_MCP_AUTH_TOKEN` required** | the server refuses to start otherwise (#226) — without a token, anyone on the network could write scripts, run the game, or export builds through your editor |
+
+```bash
+# Generate + set a token
+TOKEN=$(openssl rand -hex 32)
+GODOT_MCP_TRANSPORT=http GODOT_MCP_HTTP_HOST=0.0.0.0 GODOT_MCP_AUTH_TOKEN=$TOKEN \
+  uv run godot-editor-mcp
+```
+
+Clients pass the same token (HTTP `Authorization: Bearer …` header).
+
+### Bridge handshake auth (#538)
+
+The editor↔server WebSocket bridge is localhost-only; the bridge token adds a
+shared secret for shared/self-hosted runners and remote-editor setups. It is
+**opt-in on each side** — unset means no auth (zero-config local dev, unchanged
+path). Both sides read `GODOT_MCP_BRIDGE_TOKEN`.
+
+| Server token | Addon token | Behavior |
+|--------------|-------------|----------|
+| unset | unset | today's path — no auth exchange (byte-identical) |
+| set | set, matching | peer authenticated, everything serves |
+| set | set, **mismatched** | structured refusal at the handshake; the addon drops into its reconnect/backoff loop and the dock log shows the refusal reason each attempt until the tokens agree |
+| set | **unset** | refused at the handshake (the addon never authenticates) — same visible reconnect loop |
+| **unset** | set | the server consumes the auth envelope as a control message and serves anyway (forward-compatible: a newer addon against an older server) |
+
+A refusal happens **at the handshake** — never as per-command errors, never as a
+silent drop. Tokens are compared in constant time and are **never logged** on
+either side.
+
+```bash
+# Shared/self-hosted runner: pin the same token on both sides
+TOKEN=$(openssl rand -hex 32)
+GODOT_MCP_BRIDGE_TOKEN=$TOKEN uv run godot-editor-mcp          # server
+GODOT_MCP_BRIDGE_TOKEN=$TOKEN godot --editor --path ./game     # the editor's env
+```
+
+### Listener hardening (#636)
+
+Browsers do **not** apply the same-origin policy to WebSockets, and DNS
+rebinding can make a page the user visits resolve to `127.0.0.1`. Both listeners
+are hardened by default:
+
+- **Bridge WebSocket**: the listener accepts only Origin-less handshakes
+  (`origins=[None]`) — the Godot addon's `WebSocketPeer` sends no `Origin`, so a
+  browser page is rejected at the handshake (`403`) before it can reach the
+  bridge. A bad-or-missing-token peer is also refused *before* it can displace
+  the authenticated editor (#635).
+- **HTTP transport**: FastMCP's `HostOriginGuardMiddleware` is enabled by default
+  (`GODOT_MCP_HTTP_HOST_ORIGIN_PROTECTION=auto`), so a non-loopback `Host` header
+  is refused (`421`) and a foreign browser `Origin` is refused (`403`) before any
+  code-executing tool (`write_script`, `run_and_capture`, `export_project`) is
+  reachable. Opt out with `GODOT_MCP_HTTP_HOST_ORIGIN_PROTECTION=false`.
+
+Neither guard replaces the auth token — a non-loopback HTTP bind still requires
+`GODOT_MCP_AUTH_TOKEN`.
+
+## Logging
+
+Logs are one JSON object per line on **stderr** (stdout is the stdio protocol
+channel). Every log line carries the command `id` where applicable; errors
+include exception info. No secrets or full file contents are logged.

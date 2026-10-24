@@ -1,0 +1,184 @@
+"""Node-parity tools (issue #31).
+
+Rounds out node editing beyond create/rename/set/delete: duplicate, move/reparent,
+group membership, and signal-connection listing/disconnect. Extends the gated
+`scene_edit` toolset. Mutating ops are UndoRedo-wrapped addon-side and support
+``dry_run``; signal listing is ``read_only``.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from fastmcp import FastMCP
+
+from mcp_server.bridge import Bridge
+from mcp_server.categories import SCENE_EDIT_TAG
+from mcp_server.models.node_ops import (
+    DisconnectSignalResult,
+    DuplicateNodeResult,
+    GroupResult,
+    MoveNodeResult,
+    SignalConnectionList,
+)
+from mcp_server.models.persistence import persistence_fields as _persistence
+from mcp_server.safety import (
+    DESTRUCTIVE,
+    MUTATING,
+    READ_ONLY,
+    enforce_preconditions,
+    require_confirmation,
+    require_node_exists,
+)
+from mcp_server.tools._persistence import node_probe, parent_of_probe
+from mcp_server.tools._route import route, run_or_preview
+
+SCENE_EDIT = {SCENE_EDIT_TAG}
+
+
+def register_node_ops(mcp: FastMCP, bridge: Bridge) -> None:
+    """Register the node-parity tools (in the scene_edit toolset)."""
+
+    @mcp.tool(meta=MUTATING, tags=SCENE_EDIT)
+    @enforce_preconditions
+    async def duplicate_node(node_path: str, dry_run: bool = False) -> DuplicateNodeResult:
+        """Duplicate the node at ``node_path`` (with its subtree) under the same parent.
+        Returns the new node's path. Reversible via undo.
+        """
+        await require_node_exists(bridge, node_path)
+        preview = {"node_path": "", "source_path": node_path}
+        params = {"node_path": node_path}
+        return await run_or_preview(
+            dry_run,
+            DuplicateNodeResult,
+            preview,
+            bridge,
+            "cmd_duplicate_node",
+            params,
+            # #477: the duplicate keys on its (existing) parent — the parent rule.
+            persistence_probe=parent_of_probe(node_path),
+        )
+
+    @mcp.tool(meta=MUTATING, tags=SCENE_EDIT)
+    @enforce_preconditions
+    async def move_node(
+        node_path: str, new_parent_path: str, index: int = -1, dry_run: bool = False
+    ) -> MoveNodeResult:
+        """Reparent the node at ``node_path`` under ``new_parent_path`` (optionally at
+        ``index``; -1 appends). Cannot move the root or into a descendant. Reversible.
+        """
+        await require_node_exists(bridge, node_path)
+        await require_node_exists(bridge, new_parent_path)
+        params = {"node_path": node_path, "new_parent_path": new_parent_path, "index": index}
+        preview = {"node_path": node_path, "moved": False}
+        return await run_or_preview(
+            dry_run,
+            MoveNodeResult,
+            preview,
+            bridge,
+            "cmd_move_node",
+            params,
+            # #477 (destination rule): the move keys on the destination parent.
+            persistence_probe=node_probe(new_parent_path, probe_parent=True),
+        )
+
+    @mcp.tool(meta=MUTATING, tags=SCENE_EDIT)
+    @enforce_preconditions
+    async def add_to_group(node_path: str, group: str, dry_run: bool = False) -> GroupResult:
+        """Add the node to ``group`` (persistent — saved into the scene). Reversible."""
+        await require_node_exists(bridge, node_path)
+        if dry_run:
+            fields: dict[str, Any] = {
+                "node_path": node_path,
+                "group": group,
+                "in_group": True,
+                "changed": False,
+            }
+            truth = await route(bridge, "cmd_node_persistence", node_probe(node_path))
+            fields["persisted"] = truth.get("persisted")
+            fields["reason"] = truth.get("reason")
+            fields["hint"] = truth.get("hint")
+            return GroupResult(**fields, dry_run=True)
+        result = await route(bridge, "cmd_add_to_group", {"node_path": node_path, "group": group})
+        return GroupResult(
+            node_path=node_path,
+            group=group,
+            in_group=True,
+            changed=result["added"],
+            **_persistence(result),
+        )
+
+    @mcp.tool(meta=MUTATING, tags=SCENE_EDIT)
+    @enforce_preconditions
+    async def remove_from_group(node_path: str, group: str, dry_run: bool = False) -> GroupResult:
+        """Remove the node from ``group``. Reversible via undo."""
+        await require_node_exists(bridge, node_path)
+        if dry_run:
+            fields: dict[str, Any] = {
+                "node_path": node_path,
+                "group": group,
+                "in_group": False,
+                "changed": False,
+            }
+            truth = await route(
+                bridge, "cmd_node_persistence", {**node_probe(node_path), "group": group}
+            )
+            fields["persisted"] = truth.get("persisted")
+            fields["reason"] = truth.get("reason")
+            fields["hint"] = truth.get("hint")
+            return GroupResult(**fields, dry_run=True)
+        result = await route(
+            bridge, "cmd_remove_from_group", {"node_path": node_path, "group": group}
+        )
+        return GroupResult(
+            node_path=node_path,
+            group=group,
+            in_group=False,
+            changed=result["removed"],
+            **_persistence(result),
+        )
+
+    @mcp.tool(meta=READ_ONLY, tags=SCENE_EDIT)
+    @enforce_preconditions
+    async def list_signal_connections(node_path: str) -> SignalConnectionList:
+        """List the outgoing signal connections from the node at ``node_path``
+        ({ signal, target_path, method, persistent }).
+        """
+        await require_node_exists(bridge, node_path)
+        params = {"node_path": node_path}
+        return SignalConnectionList(**await route(bridge, "cmd_list_signal_connections", params))
+
+    @mcp.tool(meta=DESTRUCTIVE, tags=SCENE_EDIT)
+    @enforce_preconditions
+    async def disconnect_signal(
+        source_path: str,
+        signal_name: str,
+        target_path: str,
+        method_name: str,
+        confirm: bool = False,
+        dry_run: bool = False,
+    ) -> DisconnectSignalResult:
+        """Disconnect ``signal_name`` on the source node from ``method_name`` on the
+        target node. Undo-tracked, but destructive (it removes a connection) so it
+        requires ``confirm=True`` (``dry_run`` previews).
+        """
+        await require_node_exists(bridge, source_path)
+        await require_node_exists(bridge, target_path)
+        if not dry_run:
+            require_confirmation(confirm, "disconnect_signal")
+        params = {
+            "source_path": source_path,
+            "signal_name": signal_name,
+            "target_path": target_path,
+            "method_name": method_name,
+        }
+        preview = {
+            "source_path": source_path,
+            "signal_name": signal_name,
+            "target_path": target_path,
+            "method_name": method_name,
+            "disconnected": False,
+        }
+        return await run_or_preview(
+            dry_run, DisconnectSignalResult, preview, bridge, "cmd_disconnect_signal", params
+        )

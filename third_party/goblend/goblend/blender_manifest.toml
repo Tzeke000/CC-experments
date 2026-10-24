@@ -1,0 +1,20 @@
+schema_version = "1.0.0"
+
+blender_version_min = "4.5.7"
+id = "goblend"
+maintainer = "https://github.com/Togira123"
+name = "Goblend: Export to Godot"
+tagline = "Highly customizable export of complex scenes to Godot"
+type = "add-on"
+version = "2.1.1"
+
+tags = ["Game Engine", "Import-Export"]
+
+website = "https://goblend.dev"
+
+license = [
+  "SPDX:GPL-3.0-or-later",
+]
+
+[permissions]
+files = "Export gltf, read Godot scene files, create textures"

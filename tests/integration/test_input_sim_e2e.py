@@ -1,0 +1,184 @@
+"""End-to-end input simulation test against a live editor (issue #36).
+
+Rides on the #66 runtime-session bridge: register the probe autoload, play a scene, then
+synthesize input and confirm the running game acknowledges each injected event.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import subprocess
+from typing import Any
+
+import pytest
+
+from mcp_server.bridge import Bridge
+from mcp_server.config import BridgeConfig
+from tests.integration._godot import (
+    GODOT_BIN,
+    GODOT_PROJECT,
+    e2e_bridge_url,
+    needs_display,
+    serve_and_await_editor,
+    wait_until,
+)
+
+pytestmark = [
+    pytest.mark.skipif(GODOT_BIN is None, reason="Godot binary not installed"),
+    needs_display,
+]
+
+# Ephemeral per-run port (issue #444): no fixed port, so a concurrent
+# job's (or an orphaned) editor can never connect to this test's listener.
+BRIDGE_URL = e2e_bridge_url()
+SCRATCH = "res://tmp_e2e_input_sim.tscn"
+SCRATCH_FILE = GODOT_PROJECT / "tmp_e2e_input_sim.tscn"
+PROJECT_GODOT = GODOT_PROJECT / "project.godot"
+PROBE = "res://addons/godot_mcp/mcp_runtime_probe.gd"
+
+
+async def _ok(bridge: Bridge, command: str, params: dict[str, Any]) -> dict[str, Any]:
+    response = await bridge.send(command, params)
+    assert response.ok and response.result is not None, (
+        f"{command}: {response.error} {response.hint}"
+    )
+    return response.result
+
+
+async def _wait_scene_open(bridge: Bridge) -> None:
+    async def _open() -> bool:
+        r = await bridge.send("cmd_get_active_scene")
+        return r.ok and bool((r.result or {}).get("is_open"))
+
+    assert await wait_until(_open, timeout=20.0, interval=0.25), "scene did not open"
+
+
+async def _wait_connected(bridge: Bridge) -> None:
+    async def _connected() -> bool:
+        state = await _ok(bridge, "cmd_get_game_scene_tree", {})
+        return bool(state.get("connected"))
+
+    assert await wait_until(_connected, timeout=25.0, interval=0.5), (
+        "runtime probe never connected"
+    )
+
+
+async def _wait_injected(bridge: Bridge, at_least: int) -> int:
+    seen = {"injected": 0}
+
+    async def _reached() -> bool:
+        stats = await _ok(bridge, "cmd_get_input_stats", {})
+        seen["injected"] = int(stats["injected"])
+        return seen["injected"] >= at_least
+
+    assert await wait_until(_reached, timeout=15.0, interval=0.25), (
+        f"injected count never reached {at_least} (last={seen['injected']})"
+    )
+    return seen["injected"]
+
+
+async def _run() -> None:
+    bridge = Bridge(BridgeConfig(url=BRIDGE_URL))
+    if not await serve_and_await_editor(bridge):
+        raise AssertionError("the addon never connected to the bridge")
+
+    try:
+        await _ok(bridge, "cmd_create_scene", {"root_type": "Node2D", "scene_path": SCRATCH})
+        await _wait_scene_open(bridge)
+
+        # precondition: input with no play session is a structured error
+        no_session = await bridge.send("cmd_simulate_key", {"key": "Space"})
+        assert no_session.ok is False and no_session.error == "PRECONDITION_FAILED"
+        assert no_session.required == "play_session"
+
+        await _ok(bridge, "cmd_register_autoload", {"name": "GodotMcpProbe", "path": PROBE})
+        await _ok(bridge, "cmd_play_scene", {"scene_path": SCRATCH})
+        await _wait_connected(bridge)
+
+        # synthesize three single events; the game acknowledges each
+        await _ok(bridge, "cmd_simulate_key", {"key": "Space", "pressed": True})
+        await _ok(bridge, "cmd_simulate_mouse", {"x": 32, "y": 48, "button": "left"})
+        await _ok(bridge, "cmd_simulate_action", {"action": "ui_accept"})
+        await _wait_injected(bridge, 3)
+
+        # a sequence injects each of its events too
+        seq = await _ok(
+            bridge,
+            "cmd_play_input_sequence",
+            {
+                "events": [
+                    {"type": "key", "key": "A"},
+                    {"type": "mouse", "x": 1, "y": 1},
+                ],
+                "delay_ms": 20,
+            },
+        )
+        assert seq["count"] == 2
+        await _wait_injected(bridge, 5)
+
+        # validation: empty key, unknown mouse button, and a malformed sequence event
+        bad_key = await bridge.send("cmd_simulate_key", {"key": ""})
+        assert bad_key.ok is False and bad_key.error == "VALIDATION_ERROR"
+        bad_button = await bridge.send("cmd_simulate_mouse", {"x": 0, "y": 0, "button": "nope"})
+        assert bad_button.ok is False and bad_button.error == "VALIDATION_ERROR"
+        bad_seq = await bridge.send("cmd_play_input_sequence", {"events": [{"type": "bogus"}]})
+        assert bad_seq.ok is False and bad_seq.error == "VALIDATION_ERROR"
+        pre_break_count = (await _ok(bridge, "cmd_get_input_stats", {}))["injected"]
+
+        # #443: input injected while the game is paused at a debugger break must
+        # be REFUSED (structured precondition), not acked sent:true for input the
+        # frozen game can never process. force_break first (the probe services it
+        # on its own frame, as in test_runtime_session_e2e).
+        await _ok(bridge, "cmd_force_break", {})
+
+        async def _breaked() -> bool:
+            state = await _ok(bridge, "cmd_get_debug_break_state", {})
+            return bool(state["breaked"])
+
+        assert await wait_until(_breaked, timeout=20.0, interval=0.2), (
+            "force_break did not report the game entering the break loop"
+        )
+        for command, params in (
+            ("cmd_simulate_key", {"key": "Space", "pressed": True}),
+            ("cmd_simulate_mouse", {"x": 1, "y": 1, "button": "left"}),
+            ("cmd_simulate_action", {"action": "ui_accept"}),
+            ("cmd_play_input_sequence", {"events": [{"type": "key", "key": "A"}]}),
+        ):
+            refused = await bridge.send(command, params)
+            assert refused.ok is False and refused.error == "PRECONDITION_FAILED", (
+                f"{command} was acked while the game is frozen at a break"
+            )
+            assert "paused at a debugger break" in (refused.hint or ""), command
+            assert refused.required == "game_not_breaked", command
+        # The injected counter must NOT have moved while frozen (input was refused,
+        # not queued): it stays at the pre-break count.
+        frozen_stats = await _ok(bridge, "cmd_get_input_stats", {})
+        assert frozen_stats["injected"] == pre_break_count, frozen_stats
+        resume = await _ok(bridge, "cmd_continue_execution", {})
+        assert resume.get("resumed") is not False
+
+        await _ok(bridge, "cmd_stop_scene", {})
+    finally:
+        await bridge.close()
+
+
+def test_live_input_sim() -> None:
+    assert GODOT_BIN is not None
+    snapshot = PROJECT_GODOT.read_bytes()
+    editor = subprocess.Popen(
+        [GODOT_BIN, "--headless", "--editor", "--path", str(GODOT_PROJECT)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env={**os.environ, "GODOT_MCP_BRIDGE_URL": BRIDGE_URL},
+    )
+    try:
+        asyncio.run(_run())
+    finally:
+        editor.terminate()
+        try:
+            editor.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            editor.kill()
+        SCRATCH_FILE.unlink(missing_ok=True)
+        PROJECT_GODOT.write_bytes(snapshot)

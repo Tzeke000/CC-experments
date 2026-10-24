@@ -1,0 +1,74 @@
+---
+type: index
+title: "Consumer integration"
+description: "Layering game-specific agents on Godot Editor MCP — the skills, the orchestrator pattern, and the eval harness."
+created: 2026-09-19
+updated: 2026-10-18
+---
+
+# Consumer integration
+
+Godot Editor MCP is deliberately game-agnostic. This page maps the integration
+surface for consumers that layer game-specific behavior on top.
+
+## The integration surface
+
+A consumer pins four things (all versioned, all additive since contract 1):
+
+| Pinned surface | Where it lives | How to track drift |
+|----------------|----------------|--------------------|
+| Tool names + param keys | `_TOOL_NAMES` in the consumer's MCP client | mirror verbatim; tool-accuracy evals double as contract checks |
+| Toolset categories | `enable_toolset(category)` before gated calls | server-global set — a grant survives reconnects |
+| Envelope/result shapes | normalized `MCPResult(ok, data, error, required)` | `structuredContent` preferred when present |
+| Contract version | `godot_get_server_info.contract_version` | client compatible when `min ≤ client ≤ contract` — see [The compatibility contract](reference-contract.md) |
+
+## The companion skills (in this repo)
+
+Three installable AI skills ship under
+[`skills/`](https://github.com/hybridindie/godot-mcp/tree/main/skills) —
+copy the folders (incl. `godot-expert/references/`) into any client's skill directory:
+
+- `godot-getting-started` — bridge connection, toolset gating, safety classes,
+  honesty fields, the `godot://` resources, round-trip economy
+- `godot-playtest-and-debug` — runtime play-test, input simulation,
+  break-state gate, timeout semantics
+- `godot-expert` — Godot 4.x engine knowledge: 10 sections + 12 reference
+  guides (rendering, physics, UI, authoring, shaders, themes, …) + a
+  documented-bug list
+
+See [Skills](reference-skills.md) for what each teaches and the full guide
+index. They are pinned to the live surface by
+`tests/unit/test_skills_metadata.py` (every tool reference must resolve, the
+toolset map must cover all toolsets, every guide must be linked), so a surface
+change without a skills update fails the suite.
+
+## The orchestrator pattern
+
+A consumer that drives Godot Editor MCP as one component of a larger agent system
+**built specifically against this server** (not a generic MCP client)
+demonstrates the pattern:
+
+- Typed client wrappers mirroring Godot Editor MCP's tools verbatim, with the same
+  param keys and `_ensure_or_return_error` gating
+- Honesty-field awareness: `persisted`, `undoable`, `aborted_at`,
+  `rescan_pending`, `expected_timeout`, `game_not_breaked`
+- `notifications/tools/list_changed` handling (`toolset_generation`)
+- A live eval harness whose suites drive a real editor through the bridge —
+  the drift catcher across the integration seam
+
+## Layering your own game vocabulary
+
+The recommended shape for a game-specific consumer:
+
+1. **Keep Godot Editor MCP untouched** — it stays generic; game vocabulary ("spawn
+   wave", "upgrade tower") lives in your project.
+2. **Wrap, don't fork** — typed client wrappers per tool group, with your
+   domain models built from Godot Editor MCP's `structuredContent` payloads.
+3. **Add your own prompts/skills** — the recipe templates here
+   ([prompts](reference-prompts.md)) are the pattern; your game's versions
+   compose the same generic tools in game-shaped orders.
+4. **Pin the contract** — assert `min_compatible_contract ≤ your_contract ≤ contract_version`
+   at startup; the additive guarantee means unknown fields are safe to ignore. See
+   [The compatibility contract](reference-contract.md).
+5. **Eval the behavior** — the tool-accuracy eval pattern (score calls against
+   an `expected_tools` spec) doubles as drift detection.
