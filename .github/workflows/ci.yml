@@ -1,51 +1,40 @@
-# CI gates — kept in sync with .opencode/rules/enforcement.md.
-# Suite health (zero skips) · lint (ruff) · type check (mypy) · tests (pytest).
+# CI gates — suite health (zero skips) · lint (ruff) · type check (mypy) · tests.
 #
-# Split into parallel jobs (lint, types, tests, camelCase) so they run
-# simultaneously on separate runner pods instead of sequentially in one job.
-# Wall time drops from ~7 min (sequential) to ~2 min (bounded by the slowest
-# job = pytest). The camelCase gate is scoped to the transform contract tests
-# (3 tests, <1s) instead of re-running the full pytest suite.
+# Making Things (MT-3): default runner is GitHub-hosted `ubuntu-latest` so jobs
+# actually run on this fork (upstream hybridindie labels `[self-hosted, linux,
+# hybridindie]` / `[self-hosted, godot]` have no runners here and stay queued).
+#
+# Optional self-hosted: set repo Actions variable MT_CI_RUNS_ON to a JSON array,
+# e.g. ["self-hosted","making-things","godot"]. See docs/making-things/self-hosted-runner.md.
 name: ci
 
 on:
   push:
     branches: [main]
   pull_request:
-  # Manual re-run (e.g. after a runner-level flake in `uv python install`).
   workflow_dispatch:
 
-# Cancel a superseded run when a new commit lands on the same ref (iterative PR
-# pushes) — only the latest commit's CI matters, so this saves runner minutes (#309).
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Self-hosted runners share /runner/_work/_cache; keep uv's package and
-# Python caches there instead of setup-uv's actions/cache restore, which
-# hangs on the self-hosted cache service (#579). Step timeouts fail a hung
-# download fast instead of stalling the job.
+# uv uses its default cache on ubuntu-latest. Self-hosted hosts can export
+# UV_CACHE_DIR=/runner/_work/_cache/uv in the runner's .env if they mount that path.
 env:
-  UV_CACHE_DIR: /runner/_work/_cache/uv
-  UV_PYTHON_INSTALL_DIR: /runner/_work/_cache/uv-python
+  GODOT_MCP_ALLOW_INSECURE_BRIDGE: "1"
 
 jobs:
   lint:
     name: lint (ruff)
     timeout-minutes: 20
-    runs-on: [self-hosted, linux, hybridindie]
-    # SECURITY (public repo + self-hosted runner, issue #650): never execute
-    # untrusted fork code on the runner. Only same-repo branch PRs and pushes
-    # run; fork PRs skip this job. Mirrors e2e.yml — pair it with the repo
-    # setting "Require approval for all outside collaborators".
+    runs-on: ${{ fromJSON(vars.MT_CI_RUNS_ON || '["ubuntu-latest"]') }}
+    # SECURITY: never execute untrusted fork code on a self-hosted runner.
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
-      # Pinned uv from the shared runner cache (see .github/actions/setup-uv);
-      # avoids the third-party binary-download stall (#750/#752).
       - name: Install uv
         uses: ./.github/actions/setup-uv
         timeout-minutes: 5
@@ -58,7 +47,7 @@ jobs:
         run: uv sync --frozen
 
       - name: Zero-skip scan (suite health)
-        run: ./.opencode/hooks/check-no-skipped-tests.sh
+        run: bash scripts/ci/check-no-skipped-tests.sh
 
       - name: Lint (ruff check)
         run: uv run ruff check .
@@ -66,19 +55,13 @@ jobs:
   types:
     name: types (mypy)
     timeout-minutes: 20
-    runs-on: [self-hosted, linux, hybridindie]
-    # SECURITY (public repo + self-hosted runner, issue #650): never execute
-    # untrusted fork code on the runner. Only same-repo branch PRs and pushes
-    # run; fork PRs skip this job. Mirrors e2e.yml — pair it with the repo
-    # setting "Require approval for all outside collaborators".
+    runs-on: ${{ fromJSON(vars.MT_CI_RUNS_ON || '["ubuntu-latest"]') }}
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
-      # Pinned uv from the shared runner cache (see .github/actions/setup-uv);
-      # avoids the third-party binary-download stall (#750/#752).
       - name: Install uv
         uses: ./.github/actions/setup-uv
         timeout-minutes: 5
@@ -95,20 +78,14 @@ jobs:
 
   tests:
     name: tests (pytest)
-    timeout-minutes: 20
-    runs-on: [self-hosted, linux, hybridindie]
-    # SECURITY (public repo + self-hosted runner, issue #650): never execute
-    # untrusted fork code on the runner. Only same-repo branch PRs and pushes
-    # run; fork PRs skip this job. Mirrors e2e.yml — pair it with the repo
-    # setting "Require approval for all outside collaborators".
+    timeout-minutes: 25
+    runs-on: ${{ fromJSON(vars.MT_CI_RUNS_ON || '["ubuntu-latest"]') }}
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
-      # Pinned uv from the shared runner cache (see .github/actions/setup-uv);
-      # avoids the third-party binary-download stall (#750/#752).
       - name: Install uv
         uses: ./.github/actions/setup-uv
         timeout-minutes: 5
@@ -121,24 +98,20 @@ jobs:
         run: uv sync --frozen
 
       - name: Tests (pytest)
+        # Without GODOT_BIN, Godot-gated integration tests skipif (same as
+        # upstream hybridindie linux pool). Live coverage is e2e.yml.
         run: uv run pytest -q
 
   camelcase:
     name: camelCase gate (compat bridge off)
     timeout-minutes: 20
-    runs-on: [self-hosted, linux, hybridindie]
-    # SECURITY (public repo + self-hosted runner, issue #650): never execute
-    # untrusted fork code on the runner. Only same-repo branch PRs and pushes
-    # run; fork PRs skip this job. Mirrors e2e.yml — pair it with the repo
-    # setting "Require approval for all outside collaborators".
+    runs-on: ${{ fromJSON(vars.MT_CI_RUNS_ON || '["ubuntu-latest"]') }}
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
-      # Pinned uv from the shared runner cache (see .github/actions/setup-uv);
-      # avoids the third-party binary-download stall (#750/#752).
       - name: Install uv
         uses: ./.github/actions/setup-uv
         timeout-minutes: 5
@@ -150,38 +123,24 @@ jobs:
       - name: Sync dependencies
         run: uv sync --frozen
 
-      # Scoped to the tool-transform contract tests (3 tests, <1s) instead of
-      # re-running the full pytest suite. The camelCase compat bridge only
-      # affects tool-name transforms; test_tool_transform.py is the contract
-      # that enforces every tool is godot_<toolset>_<action> named.
       - name: camelCase regression gate (compat bridge off)
         env:
           FASTMCP_MCP_CAMELCASE_COMPAT: "false"
         run: uv run pytest -q tests/contract/test_tool_transform.py
-  # Godot 4.4 is the addon's supported floor (docs, .opencode/rules/addon.md).
-  # The e2e lane only exercises 4.7, so a 4.5+ API in the addon used to ship
-  # undetected (issues #648, #738, #701). This job loads the addon in the real
-  # 4.4 editor (editor load parses every preloaded script) and runs the
-  # headless smokes on the floor.
-  #
-  # Runs on the Godot-capable runner; the image bakes 4.4 at /opt/godot/4.4/godot
-  # (infra/runner.Dockerfile). Until that image is rolled out, the step downloads
-  # the pinned release with Godot's published SHA512 checksum.
+
+  # Godot 4.4 floor — addon parse + headless smokes. Downloads 4.4 when no
+  # baked binary (ubuntu-latest); uses /opt/godot/4.4/godot on a Making Things
+  # self-hosted image when present.
   godot-floor:
     name: godot 4.4 floor (parse + smoke)
-    runs-on: [self-hosted, godot]
-    # SECURITY (public repo + self-hosted runner, issue #650): never execute
-    # untrusted fork code on the runner. Only same-repo branch PRs and pushes
-    # run; fork PRs skip this job. Mirrors e2e.yml.
+    runs-on: ${{ fromJSON(vars.MT_CI_RUNS_ON || '["ubuntu-latest"]') }}
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
-      # Pinned uv from the shared runner cache (see .github/actions/setup-uv);
-      # avoids the third-party binary-download stall (#750/#752).
       - name: Install uv
         uses: ./.github/actions/setup-uv
         timeout-minutes: 5
@@ -204,7 +163,7 @@ jobs:
           fi
           version=4.4-stable
           asset="Godot_v${version}_linux.x86_64.zip"
-          dir="$RUNNER_TEMP/godot44"
+          dir="${RUNNER_TEMP:-/tmp}/godot44"
           mkdir -p "$dir"
           cd "$dir"
           if [ ! -x godot ]; then
@@ -230,12 +189,9 @@ jobs:
           esac
 
       - name: Parse the whole addon in the 4.4 editor
-        # The plugin is enabled in godot/project.godot; handlers preload at parse
-        # time, so one 4.4-incompatible API fails the editor load. Assert on the
-        # script errors explicitly: --quit still exits 0 after a parse failure.
         run: |
           set -euo pipefail
-          log="$RUNNER_TEMP/godot44-parse.log"
+          log="${RUNNER_TEMP:-/tmp}/godot44-parse.log"
           timeout 180 "$GODOT_BIN" --headless --path godot --editor --quit \
             2>&1 | tee "$log"
           if grep -qE "SCRIPT ERROR|Parse Error|Failed to load script" "$log"; then

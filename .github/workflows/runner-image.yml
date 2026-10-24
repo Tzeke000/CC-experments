@@ -1,9 +1,10 @@
-# Build and push the custom Godot-capable GitHub Actions runner image to GHCR.
-# The image is used by the [self-hosted, godot] RunnerDeployment that serves
-# the e2e (godot-mcp) and gle-bench (godot-agents) workflows.
+# Build and push a Godot-capable Actions runner image to GHCR (optional).
+# Making Things: defaults to ubuntu-latest so this is not stuck on hybridindie
+# labels. Image name follows this repository (not hybridindie/godot-mcp).
 #
-# Manual dispatch is the primary trigger (rebuild only when the Godot version
-# or base runner image bumps). Also runs on changes to the Dockerfile itself.
+# Manual dispatch is the primary trigger. Owner may set MT_CI_RUNS_ON to a
+# self-hosted label set after attaching a runner — see
+# docs/making-things/self-hosted-runner.md.
 name: runner-image
 
 on:
@@ -20,15 +21,15 @@ permissions:
 
 jobs:
   build:
-    runs-on: [self-hosted, linux, hybridindie]
+    runs-on: ${{ fromJSON(vars.MT_CI_RUNS_ON || '["ubuntu-latest"]') }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
-        uses: docker/login-action@v4.1.0
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -36,16 +37,16 @@ jobs:
 
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@v6.2.0
+        uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/hybridindie/godot-mcp-runner
+          images: ghcr.io/${{ github.repository }}/godot-runner
           tags: |
             type=raw,value=4.7
             type=sha,prefix=
             type=raw,value=latest
 
       - name: Build and push
-        uses: docker/build-push-action@v7.4.0
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: infra/runner.Dockerfile

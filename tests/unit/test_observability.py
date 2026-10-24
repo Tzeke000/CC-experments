@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 
 import pytest
 
@@ -16,7 +17,7 @@ from mcp_server.observability import (
 
 
 @pytest.fixture(autouse=True)
-def _clean_ring() -> None:
+def _clean_ring() -> Iterator[None]:
     clear_events()
     yield
     clear_events()

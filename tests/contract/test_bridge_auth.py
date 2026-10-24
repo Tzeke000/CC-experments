@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from pathlib import Path
 
 import pytest
 
@@ -287,7 +288,7 @@ async def test_no_token_replacement_still_works() -> None:
 
 
 async def test_bridge_config_reads_token_from_env(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """GODOT_MCP_BRIDGE_TOKEN flows into BridgeConfig.from_env (mirrors the URL)."""
     monkeypatch.setenv("GODOT_MCP_BRIDGE_TOKEN", "env-token")
@@ -295,9 +296,11 @@ async def test_bridge_config_reads_token_from_env(
     assert config.auth_token == "env-token"
     monkeypatch.delenv("GODOT_MCP_BRIDGE_TOKEN", raising=False)
     # Making Things decision C: without env token, insecure opt-out yields None;
-    # otherwise a file is minted. Cover both paths.
+    # otherwise a file is minted. Cover both paths. Point the token file at an
+    # empty tmp path so a previously minted ~/.config token cannot leak in.
+    empty_token = tmp_path / "missing.token"
+    monkeypatch.setenv("GODOT_MCP_BRIDGE_TOKEN_FILE", str(empty_token))
     monkeypatch.setenv("GODOT_MCP_ALLOW_INSECURE_BRIDGE", "1")
-    monkeypatch.delenv("GODOT_MCP_BRIDGE_TOKEN_FILE", raising=False)
     assert BridgeConfig.from_env().auth_token is None
     monkeypatch.delenv("GODOT_MCP_ALLOW_INSECURE_BRIDGE", raising=False)
     token_file = tmp_path / "bridge.token"

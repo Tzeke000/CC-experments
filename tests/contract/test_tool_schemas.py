@@ -21,7 +21,9 @@ from tests.fakes import FakeAddonConnection, connector_for
 # skills/docs, not the per-tool docstring.
 _DESCRIPTION_BUDGET = 1100
 # And the whole surface (sum of descriptions) must fit this.
-_TOTAL_BUDGET = 62_000
+# Making Things adds observability / set_live_property / build_csharp docs;
+# keep a hard ceiling so the surface cannot grow unbounded (#654).
+_TOTAL_BUDGET = 65_000
 
 
 async def _tools() -> list[Any]:

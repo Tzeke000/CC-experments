@@ -97,6 +97,7 @@ filterwarnings = ["error::pytest.PytestUnraisableExceptionWarning"]
 [tool.ruff]
 target-version = "py311"
 line-length = 100
+extend-exclude = ["third_party", ".venv", "node_modules"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
@@ -110,3 +111,8 @@ files = ["mcp_server", "tests"]
 [[tool.mypy.overrides]]
 module = ["png"]
 ignore_missing_imports = true
+
+# Vendored Goblend / other trees are not part of the typed surface.
+[[tool.mypy.overrides]]
+module = ["third_party.*"]
+ignore_errors = true

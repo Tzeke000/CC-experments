@@ -12,14 +12,14 @@ from mcp_server.safety import READ_ONLY
 
 
 class LogEventsResult(BaseModel):
-    events: list[dict] = Field(default_factory=list)
+    events: list[dict[str, object]] = Field(default_factory=list)
     next_seq: int = 0
     truncated: bool = False
     count: int = 0
 
 
 class OpenErrorsResult(BaseModel):
-    errors: list[dict] = Field(default_factory=list)
+    errors: list[dict[str, object]] = Field(default_factory=list)
     count: int = 0
 
 
