@@ -1,0 +1,44 @@
+id: playtest_live_mutate
+title: Playtest loop with runtime-only live mutate
+prompt: |
+  Drive a Making Things playtest_loop against the live editor:
+  1) enable runtime + runtime_inspect toolsets
+  2) play a scene with the runtime probe
+  3) inspect game output / remote tree
+  4) call godot_runtime_set_live_property (dry_run first) — expect persisted=false
+  5) optionally undo via previous_value; stop the scene
+  Do not claim the edited .tscn was rewritten.
+skills:
+  - making-things-godot-playtest-debug
+prompts:
+  - playtest_loop
+expected_tools:
+  - godot_enable_toolset
+  - godot_runtime_play_scene
+  - godot_runtime_set_live_property
+  - godot_runtime_stop_scene
+required_subsequence:
+  - godot_runtime_set_live_property
+pass_criteria:
+  - live_mutate_reports_persisted_false
+  - dry_run_or_undo_present
+mock_script:
+  - tool: godot_enable_toolset
+    arguments: { category: runtime }
+  - tool: godot_enable_toolset
+    arguments: { category: runtime_inspect }
+  - tool: godot_runtime_play_scene
+    arguments: { scene_path: res://tmp_e2e_set_live_property.tscn }
+  - tool: godot_runtime_set_live_property
+    arguments:
+      node_path: /root/Main/Start
+      property: visible
+      value: false
+      dry_run: true
+  - tool: godot_runtime_set_live_property
+    arguments:
+      node_path: /root/Main/Start
+      property: visible
+      value: false
+  - tool: godot_runtime_stop_scene
+    arguments: {}
