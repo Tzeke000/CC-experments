@@ -22,6 +22,7 @@ func register(handlers: Dictionary) -> void:
 	handlers["cmd_patch_script"] = _cmd_patch_script
 	handlers["cmd_read_script"] = _cmd_read_script
 	handlers["cmd_write_script"] = _cmd_write_script
+	handlers["cmd_build_csharp"] = _cmd_build_csharp
 
 
 # -- handlers ----------------------------------------------------------------
@@ -138,19 +139,64 @@ func _cmd_write_script(params: Dictionary) -> Dictionary:
 
 
 
+func _cmd_build_csharp(params: Dictionary) -> Dictionary:
+	## Making Things / issue #207 Phase 2: run ``dotnet build`` on the project csproj.
+	## Prefer the MCP tool (server-side) when available; this path works from the
+	## editor alone for dock/script-check flows.
+	if not ClassDB.class_exists("CSharpScript"):
+		return _router._fail(
+			"UNSUPPORTED",
+			"C# build requires a Godot .NET/mono editor binary.",
+			"csharp_supported",
+		)
+	var csproj := _router._csproj_path()
+	if csproj.is_empty():
+		return _router._fail(
+			"PRECONDITION_FAILED",
+			"No .csproj at res:// root — not a C# Godot project.",
+			"csharp_project",
+		)
+	if not _router._dotnet_cli_available():
+		return _router._fail(
+			"PRECONDITION_FAILED",
+			"dotnet CLI not found on PATH. Install .NET 8 SDK, then retry.",
+			"csharp_build",
+		)
+	var abs_csproj := ProjectSettings.globalize_path(csproj)
+	var configuration := str(params.get("configuration", "Debug"))
+	var output: Array = []
+	var args := PackedStringArray(["build", abs_csproj, "-c", configuration, "-v", "q"])
+	var code := OS.execute("dotnet", args, output, true, false)
+	var joined := "\n".join(output)
+	return _router._ok({
+		"ok": code == 0,
+		"exit_code": code,
+		"csproj": csproj,
+		"configuration": configuration,
+		"output": joined,
+		"hint": (
+			"Build succeeded — C# types are loadable after editor/game reload."
+			if code == 0
+			else "Build failed — see output; fix .cs then call godot_scripts_build_csharp again."
+		),
+	})
+
+
 func _cmd_patch_script(params: Dictionary) -> Dictionary:
 	var path := str(params.get("script_path", ""))
-	# Phase 1 (#207): a compiled find/replace without a build check invites broken
-	# C# — refuse .cs (defense-in-depth; the server refuses it first).
+	# Phase 2 (#207): .cs patch is allowed when the build primitive exists; still
+	# require a follow-up ``cmd_build_csharp`` before the change is loadable.
 	if path.ends_with(".cs"):
-		return _router._fail(
-			"VALIDATION_ERROR",
-			"patch_script does not edit .cs files yet — C# edits are Phase 2 (issue #207). "
-				+ "Use write_script for full-file .cs authoring.",
-			"script_path",
-		)
-	if not path.ends_with(".gd"):
-		return _router._fail("VALIDATION_ERROR", "script_path must end with .gd.")
+		if not _router._csharp_build_ready():
+			return _router._fail(
+				"VALIDATION_ERROR",
+				"patch_script for .cs needs csharp_build (dotnet CLI + .NET editor + .csproj). "
+					+ "Use write_script for full-file authoring, or install the .NET SDK.",
+				"script_path",
+			)
+		# Fall through to the shared patch path below (.cs treated like .gd bytes).
+	elif not path.ends_with(".gd"):
+		return _router._fail("VALIDATION_ERROR", "script_path must end with .gd or .cs.")
 	if not FileAccess.file_exists(path):
 		return _router._fail("RESOURCE_NOT_FOUND", "No script at '%s'." % path)
 	var find := str(params.get("find", ""))
@@ -174,13 +220,19 @@ func _cmd_patch_script(params: Dictionary) -> Dictionary:
 			"hint": "The editor did not keep the patched script content.",
 			"receipt": MCPReceipt.make("noop", []),
 		})
-	return _router._ok({
+	var result := {
 		"script_path": path,
 		"replacements": occurrences,
 		"receipt": MCPReceipt.make("updated", [
 			MCPReceipt.change(path, "write", before_state, MCPReceipt.file_state(path)),
 		]),
-	})
+	}
+	if path.ends_with(".cs"):
+		result["hint"] = (
+			"C# patch landed on disk but is not loadable until godot_scripts_build_csharp "
+			+ "(or `dotnet build`) succeeds."
+		)
+	return _router._ok(result)
 
 
 func _collect_scripts(directory: String, out: Array, language: String) -> void:

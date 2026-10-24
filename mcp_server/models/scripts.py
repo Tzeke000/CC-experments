@@ -99,3 +99,15 @@ class ParseCheckResult(BaseModel):
     # parser reads global_script_class_cache.cfg from disk, so a "Could not
     # find type" error on a fresh class_name may be stale-cache, not real.
     rescan_pending: bool = False
+
+
+class BuildCsharpResult(BaseModel):
+    """Result of ``dotnet build`` on the project's ``.csproj`` (issue #207 Phase 2)."""
+
+    ok: bool
+    exit_code: int = 0
+    csproj: str = ""
+    configuration: str = "Debug"
+    output: str = ""
+    hint: str | None = None
+    dry_run: bool = False

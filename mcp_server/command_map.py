@@ -166,6 +166,7 @@ BARE_TO_COMMAND: dict[str, str] = {
     "scripts_patch": "cmd_patch_script",
     "scripts_read": "cmd_read_script",
     "scripts_write": "cmd_write_script",
+    "scripts_build_csharp": "cmd_build_csharp",
     "shader_assign_material": "cmd_assign_shader_material",
     "shader_create": "cmd_create_shader",
     "shader_get_param": "cmd_get_shader_param",

@@ -39,6 +39,7 @@ func _test_backend_probe(failures: Array[String]) -> void:
 	var info: Dictionary = result.get("result", {})
 	_eq(failures, "info.csharp_supported", info.get("csharp_supported"), false)
 	_eq(failures, "info.csharp_project", info.get("csharp_project"), false)
+	_eq(failures, "info.csharp_build", info.get("csharp_build"), false)
 	# The language-aware list: no .cs files in this project, .gd files exist.
 	var cs_list: Dictionary = router.handle({"id": "2", "command": "cmd_list_scripts", "params": {"language": "cs"}})
 	_eq(failures, "list.cs.ok", cs_list_result(cs_list).get("ok"), true)

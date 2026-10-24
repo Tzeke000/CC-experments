@@ -558,17 +558,17 @@ editor's undo (the prior content is restored, and undoing a *created* script als
 its `.uid` sidecar). The agent composes `godot_scripts_get_parse_errors` to validate after a write —
 `godot_scripts_write` does not auto-validate.
 
-**C# authoring (issue #207 Phase 1).** The scripts surface is language-aware: `read`/`list`/`write`
-accept `.cs` alongside `.gd` (default contracts unchanged), `godot_scripts_list` gains
-`language="gd"|"cs"`. C# is **compiled, not live**: a `.cs` write lands the bytes but the new
-script is invisible to the game until an MSBuild rebuild, so the write result carries a `hint`
-saying to validate via a C# build (Phase 2) — never a false parse-OK. `godot_scripts_patch`
-stays GDScript-only in Phase 1 (a find/replace in compiled C# without a build check invites
-broken code — refused with the Phase 2 pointer); `godot_scripts_get_parse_errors` refuses
-`.cs` for the same reason (`godot --check-only` does not validate C#). The backend capability
-rides `cmd_get_project_info` and surfaces in `godot_get_server_info.bridge.backend`:
+**C# authoring (issue #207 Phase 1 + Phase 2 build).** The scripts surface is language-aware:
+`read`/`list`/`write` accept `.cs` alongside `.gd` (default contracts unchanged),
+`godot_scripts_list` gains `language="gd"|"cs"`. C# is **compiled, not live**: a `.cs` write
+lands the bytes but the new script is invisible to the game until a rebuild, so the write
+result carries a `hint` pointing at **`godot_scripts_build_csharp`** (Phase 2) — never a false
+parse-OK. `godot_scripts_patch` accepts `.cs` when `csharp_build` is ready (still requires a
+follow-up build); `godot_scripts_get_parse_errors` refuses `.cs` and redirects to the build
+tool (`godot --check-only` does not validate C#). The backend capability rides
+`cmd_get_project_info` and surfaces in `godot_get_server_info.bridge.backend`:
 `{ csharp_supported (the editor is a .NET build — `CSharpScript` in ClassDB),
-csharp_project (a `.csproj` exists in res://), csharp_build (false until Phase 2) }`.
+csharp_project (a `.csproj` exists in res://), csharp_build (true when dotnet CLI + .NET editor + .csproj) }`.
 An older addon omits the probe — the field reads `null` ("unknown backend"), not an error.
 
 `get_parse_errors` is deterministic across the deferred rescan (#453): the subprocess

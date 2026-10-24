@@ -11,6 +11,9 @@ errors. All in the gated ``scripts`` toolset.
 from __future__ import annotations
 
 import asyncio
+import shutil
+import subprocess
+from pathlib import Path
 from typing import Annotated, Literal
 
 from fastmcp import FastMCP
@@ -21,6 +24,7 @@ from mcp_server.bridge import Bridge
 from mcp_server.categories import SCRIPTS_TAG
 from mcp_server.config import ServerConfig
 from mcp_server.models.scripts import (
+    BuildCsharpResult,
     NodeScript,
     ParseCheckResult,
     PatchScriptResult,
@@ -120,10 +124,9 @@ def register_scripts(mcp: FastMCP, bridge: Bridge, config: ServerConfig, runner:
             # A preview must predict the real run's guidance (PR #559 review):
             # the build hint rides the dry-run too.
             build_hint = (
-                "C# script written but NOT yet usable: C# is compiled, not live. Validate "
-                "via a C# build (godot_scripts_get_parse_errors does not cover .cs — "
-                "build support ships in Phase 2, issue #207); the new script is invisible "
-                "to the game until an MSBuild rebuild."
+                "C# script written but NOT yet usable until a build. Call "
+                "godot_scripts_build_csharp (or `dotnet build` on the .csproj). "
+                "godot_scripts_get_parse_errors does not cover .cs."
             )
         else:
             build_hint = None
@@ -150,17 +153,90 @@ def register_scripts(mcp: FastMCP, bridge: Bridge, config: ServerConfig, runner:
     ) -> PatchScriptResult:
         """Replace every occurrence of ``find`` with ``replace`` in the script
         (``.gd`` or ``.cs``). Errors if ``find`` isn't present. Reversible via undo;
-        ``dry_run`` previews. A ``.cs`` patch still needs a C# build to take effect
-        (issue #207)."""
-        if script_path.endswith(".cs"):
-            raise ToolError(
-                "VALIDATION_ERROR: patch_script does not edit .cs files yet — C# edits are "
-                "Phase 2 (issue #207). Use write_script for full-file .cs authoring."
-            )
+        ``dry_run`` previews. A ``.cs`` patch needs ``godot_scripts_build_csharp``
+        before it is loadable (issue #207 Phase 2)."""
         params = {"script_path": script_path, "find": find, "replace": replace}
-        preview = {"script_path": script_path, "replacements": 0}
+        preview = {
+            "script_path": script_path,
+            "replacements": 0,
+            "hint": (
+                "C# patch preview — call godot_scripts_build_csharp after a real run."
+                if script_path.endswith(".cs")
+                else None
+            ),
+        }
         return await run_or_preview(
             dry_run, PatchScriptResult, preview, bridge, "cmd_patch_script", params
+        )
+
+    @mcp.tool(meta=MUTATING, tags=SCRIPTS)
+    async def build_csharp(
+        configuration: Annotated[str, Field(description="MSBuild configuration")] = "Debug",
+        dry_run: bool = False,
+    ) -> BuildCsharpResult:
+        """Build the project's C# assembly via ``dotnet build`` (issue #207 Phase 2).
+
+        Requires a Godot .NET/mono editor, a ``.csproj`` under ``res://``, and the
+        .NET SDK (``dotnet``) on PATH. Prefer this after ``write_script`` /
+        ``patch_script`` on ``.cs`` files — until the build succeeds the new code
+        is invisible to the game.
+
+        WHEN TO USE: validate C# after authoring. WHEN NOT TO USE: GDScript —
+        use ``get_parse_errors`` instead.
+        """
+        project_dir = Path(await resolve_project_dir(bridge, config))
+        csprojs = sorted(project_dir.glob("*.csproj"))
+        if not csprojs:
+            raise ToolError(
+                "PRECONDITION_FAILED: No .csproj at the project root — not a C# Godot project."
+            )
+        csproj = csprojs[0]
+        if not shutil.which("dotnet"):
+            raise ToolError(
+                "PRECONDITION_FAILED: dotnet CLI not found on PATH. Install .NET 8 SDK."
+            )
+        if dry_run:
+            return BuildCsharpResult(
+                ok=True,
+                exit_code=0,
+                csproj=f"res://{csproj.name}",
+                configuration=configuration,
+                output="",
+                hint=f"Would run: dotnet build {csproj} -c {configuration}",
+                dry_run=True,
+            )
+        # Prefer the addon path when connected (editor-local env); fall back to
+        # a host-side ``dotnet build`` so smoke/CI works without a live peer.
+        if bridge.connected:
+            try:
+                result = await route(
+                    bridge,
+                    "cmd_build_csharp",
+                    {"configuration": configuration},
+                )
+                return BuildCsharpResult(**result)
+            except ToolError:
+                pass
+        proc = await asyncio.to_thread(
+            subprocess.run,
+            ["dotnet", "build", str(csproj), "-c", configuration, "-v", "q"],
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+        joined = (proc.stdout or "") + (proc.stderr or "")
+        return BuildCsharpResult(
+            ok=proc.returncode == 0,
+            exit_code=proc.returncode,
+            csproj=f"res://{csproj.name}",
+            configuration=configuration,
+            output=joined.strip(),
+            hint=(
+                "Build succeeded — reload the scene/game to pick up C# changes."
+                if proc.returncode == 0
+                else "Build failed — see output; fix .cs then retry."
+            ),
         )
 
     @mcp.tool(meta=READ_ONLY, tags=SCRIPTS)
@@ -177,13 +253,11 @@ def register_scripts(mcp: FastMCP, bridge: Bridge, config: ServerConfig, runner:
         """
         require_godot_binary(runner.binary)
         if script_path.endswith(".cs"):
-            # Phase 1 honesty (#207): C# is compiled, not live — godot --check-only
-            # does not validate it, and a parse-OK would be a false positive. Refuse
-            # with the build hint until Phase 2 ships the build primitive.
+            # Phase 2 honesty (#207): still no GDScript-style parse for C# —
+            # point agents at the build primitive instead of a false parse-OK.
             raise ToolError(
-                "VALIDATION_ERROR: get_parse_errors checks GDScript syntax only — it does "
-                "not validate C# (issue #207). A .cs file is usable only after an MSBuild "
-                "build (Phase 2); until then there is no in-MCP C# validation."
+                "VALIDATION_ERROR: get_parse_errors checks GDScript syntax only. "
+                "For C#, call godot_scripts_build_csharp (issue #207 Phase 2)."
             )
         project_dir = await resolve_project_dir(bridge, config)
         # #453: the check's subprocess reads global_script_class_cache.cfg from

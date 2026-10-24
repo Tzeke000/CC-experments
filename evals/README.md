@@ -1,14 +1,22 @@
-# Evals (server self-analysis only)
+# Evals (server self-analysis + Making Things scripted trajectory)
 
-`evals/` holds **one** thing in this repo: the Instruction Staleness Verifier —
-static analysis of godot-mcp's *own* tool docs vs. the addon's bridge handler
-registrations. It is server self-analysis, not an agent evaluation.
+`evals/` holds:
+
+1. **Instruction Staleness Verifier** — static analysis of godot-mcp's *own*
+   tool docs vs. the addon's bridge handler registrations.
+2. **Making Things trajectory harness** (`making_things_trajectory.py`) — a
+   **non-LLM** checklist that runs the diagnose smoke + structural gates an
+   agent would need. Not a substitute for LLM agent evals.
 
 The LLM eval **harness** (agents, task suites, variant A/B testing, transition/
 composition/negative/batch runners, results archives) is a consumer concern and
 lives in **godot-agents** as the self-contained `godot_agent_harness` package
 (godot-agents#481, moved in #383). It imports `godot_editor_mcp` only via the
 published wheel — no cross-repo source imports.
+
+**Blocker / next step for LLM trajectories:** pin a `diagnose_broken_script`
+(and `playtest_loop` + `set_live_property`) case in godot-agents against this
+fork's wheel; this repo intentionally does not vendor that harness.
 
 ## Usage
 
@@ -21,6 +29,9 @@ uv run python -m evals.instruction_staleness --runtime
 
 # Both
 uv run python -m evals.instruction_staleness --all
+
+# Making Things scripted trajectory (diagnose smoke + skills/prompts present)
+uv run python -m evals.making_things_trajectory
 ```
 
 ## Why the harness moved

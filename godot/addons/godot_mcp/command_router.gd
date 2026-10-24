@@ -425,13 +425,14 @@ func _cmd_get_project_info(_params: Dictionary) -> Dictionary:
 		"project_path": ProjectSettings.globalize_path("res://"),
 		"autoloads": _autoloads(),
 		"input_actions": _input_actions(),
-		# Scripting backend probe (issue #207 Phase 1): lets agents branch before
+		# Scripting backend probe (issue #207): lets agents branch before
 		# authoring .cs. ``csharp_supported`` = the editor is a .NET build
 		# (CSharpScript is only in Mono/.NET builds); ``csharp_project`` = a
-		# .csproj exists in res:// (a C# project). Verified live on 4.7: a
-		# non-.NET build has neither; the fields are absent on older addons.
+		# .csproj exists in res:// (a C# project); ``csharp_build`` = Phase 2
+		# build primitive is usable (dotnet CLI on PATH). Verified live on 4.7.
 		"csharp_supported": ClassDB.class_exists("CSharpScript"),
-		"csharp_project": FileAccess.file_exists(_csproj_path()),
+		"csharp_project": not _csproj_path().is_empty(),
+		"csharp_build": _csharp_build_ready(),
 	})
 
 
@@ -451,6 +452,22 @@ func _csproj_path() -> String:
 		name = dir.get_next()
 	dir.list_dir_end()
 	return ""
+
+
+## Phase 2 (#207 / Making Things F): build primitive is ready when this is a
+## .NET editor, a .csproj exists, and ``dotnet`` is on PATH.
+func _csharp_build_ready() -> bool:
+	if not ClassDB.class_exists("CSharpScript"):
+		return false
+	if _csproj_path().is_empty():
+		return false
+	return _dotnet_cli_available()
+
+
+func _dotnet_cli_available() -> bool:
+	var output: Array = []
+	var code := OS.execute("dotnet", PackedStringArray(["--version"]), output, true, false)
+	return code == 0
 
 
 ## Self-description for the server↔addon handshake (issue #530, fixes #521):

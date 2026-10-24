@@ -7,8 +7,10 @@ concern — it now lives in ``godot_agent_harness`` inside godot-agents
 *gone* in this repo:
 
 - Stays: ``evals/instruction_staleness.py`` — server self-analysis of its
-  own tool docs vs. bridge handlers (never references an agent).
-- Gone: every harness module, the ``archive/`` / ``results/`` artifacts,
+  own tool docs vs. bridge handlers (never references an agent); and
+  ``evals/making_things_trajectory.py`` — Making Things non-LLM scripted
+  trajectory (not an LLM agent harness).
+- Gone: every LLM harness module, the ``archive/`` / ``results/`` artifacts,
   the moved tests, and any ``import evals`` reference to a moved module.
 """
 
@@ -49,6 +51,7 @@ MOVED_TESTS = {
 # evals/ keeps exactly these files (plus this guard's subject module).
 EXPECTED_EVALS_FILES = {
     "instruction_staleness.py",
+    "making_things_trajectory.py",
     "README.md",
 }
 

@@ -5,7 +5,7 @@ description: Run, inspect, and debug a live Godot game through the Godot Editor 
 
 # godot: play-test and debug
 
-Drive a live game session and diagnose failures. Godot must be open with the addon enabled (see `godot-getting-started`). The server's `/mcp__godot-mcp__play_test`, `/mcp__godot-mcp__debug_scene`, and `/mcp__godot-mcp__troubleshoot` prompts cover the parameterized flows.
+Drive a live game session and diagnose failures. Godot must be open with the addon enabled (see `godot-getting-started`). The server's `/mcp__godot-mcp__play_test`, `/mcp__godot-mcp__playtest_loop`, `/mcp__godot-mcp__debug_scene`, and `/mcp__godot-mcp__troubleshoot` prompts cover the parameterized flows (`playtest_loop` adds live `set_live_property` + log/error reads).
 
 **Two run modes — pick the right one:**
 

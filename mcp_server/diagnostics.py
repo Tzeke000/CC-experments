@@ -53,9 +53,9 @@ class BridgeDiagnostics(BaseModel):
     # error. Distinct from cmd_get_project_info's response: this is who the
     # server THINKS is attached, visible even before any command round-trip.
     peer_identity: dict[str, str] | None = None
-    # Scripting backend capability (issue #207 Phase 1): what the connected
+    # Scripting backend capability (issue #207): what the connected
     # editor + project support, so agents branch BEFORE authoring .cs.
-    # ``csharp_build`` is False until Phase 2 ships the build primitive.
+    # ``csharp_build`` is True when Phase 2 tooling is usable (dotnet CLI).
     backend: BackendDiagnostics | None = None
 
 
@@ -64,7 +64,7 @@ class BackendDiagnostics(BaseModel):
 
     csharp_supported: bool = False  # the editor is a .NET build (CSharpScript in ClassDB)
     csharp_project: bool = False  # a .csproj exists in res://
-    csharp_build: bool = False  # Phase 2: the build primitive is not shipped yet
+    csharp_build: bool = False  # Phase 2: dotnet CLI + .NET editor + .csproj
 
 
 class ServerDiagnostics(BaseModel):
@@ -164,14 +164,15 @@ async def _fetch_bridge_diagnostics(bridge: Bridge) -> BridgeDiagnostics:
     # The handshake is best-effort: an unreachable/older addon leaves the fields
     # None (Bridge.addon_info caches, so this costs one round-trip per peer).
     addon_info = await bridge.addon_info() or {}
-    # Backend capability (#207 Phase 1): rides cmd_get_project_info; an older
+    # Backend capability (#207): rides cmd_get_project_info; an older
     # addon omits the probe — None = "unknown backend", never an error.
+    # Phase 2: pass through ``csharp_build`` (False when omitted by older addons).
     backend = None
     if "csharp_supported" in result:
         backend = BackendDiagnostics(
             csharp_supported=bool(result.get("csharp_supported")),
             csharp_project=bool(result.get("csharp_project")),
-            csharp_build=False,  # Phase 2 ships the build primitive
+            csharp_build=bool(result.get("csharp_build", False)),
         )
     return BridgeDiagnostics(
         connected=True,

@@ -52,7 +52,7 @@ Read results as ground truth, not decoration: batch results carry honesty flags 
 
 ## 4. Use the built-in workflow prompts
 
-The server ships step-by-step recipes as MCP prompts (slash commands like `/mcp__godot-mcp__build_scene`): `toolset_discovery`, `build_scene`, `play_test`, `script_edit`, `debug_scene`, `troubleshoot`, `author_resource`, `export_build`, `batch_refactor`. Reach for them, or use the companion skills `godot-playtest-and-debug` and `godot-expert`.
+The server ships step-by-step recipes as MCP prompts (slash commands like `/mcp__godot-mcp__build_scene`): `toolset_discovery`, `build_scene`, `play_test`, `playtest_loop`, `script_edit`, `debug_scene`, `troubleshoot`, `author_resource`, `export_build`, `batch_refactor`, `fix_import`. Reach for them, or use the companion skills `godot-playtest-and-debug` and `godot-expert`.
 
 ## 5. Read context as resources (cheaper than tool round-trips)
 

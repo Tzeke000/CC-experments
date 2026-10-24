@@ -164,20 +164,18 @@ async def test_list_scripts_language_default_gd() -> None:
     assert params["language"] == "gd"  # default preserved
 
 
-async def test_patch_script_refuses_cs_phase1() -> None:
-    """Phase 1 scope: patch_script stays GDScript-only (a find/replace in .cs
-    without a build check would invite broken C#); full-file .cs authoring via
-    write_script is the Phase 1 path. Refused with the Phase 2 hint."""
-    server, _ = _build()
+async def test_patch_script_routes_cs_phase2() -> None:
+    """Phase 2: .cs patch is allowed and routed to the addon (build still required
+    before the change is loadable — see godot_scripts_build_csharp)."""
+    server, conn = _build()
     async with Client(server) as client:
         await client.call_tool("godot_enable_toolset", {"category": "scripts"})
         result = await client.call_tool(
             "godot_scripts_patch",
             {"script_path": "res://a.cs", "find": "class A", "replace": "class B"},
-            raise_on_error=False,
         )
-    assert result.is_error
-    assert "Phase 2" in str(result.content)
+    assert result.structured_content["script_path"] == "res://a.cs"
+    assert conn.last_command().command == "cmd_patch_script"
 
 
 async def test_server_info_surfaces_backend() -> None:
@@ -189,4 +187,28 @@ async def test_server_info_surfaces_backend() -> None:
     backend = bridge_info["backend"]
     assert backend["csharp_supported"] is True
     assert backend["csharp_project"] is True
-    assert backend["csharp_build"] is False  # Phase 2 ships the build primitive
+    # Fake addon omits csharp_build → False (older addon / no Phase 2 probe).
+    assert backend["csharp_build"] is False
+
+
+async def test_server_info_surfaces_csharp_build_when_addon_reports_it() -> None:
+    def responder(cmd: CommandEnvelope) -> ResponseEnvelope | None:
+        if cmd.command == "cmd_get_project_info":
+            return ResponseEnvelope.success(
+                cmd.id,
+                {
+                    "name": "demo",
+                    "godot_version": "4.7.2.mono",
+                    "csharp_supported": True,
+                    "csharp_project": True,
+                    "csharp_build": True,
+                },
+            )
+        return _responder(cmd)
+
+    conn = FakeAddonConnection(responder=responder)
+    bridge = Bridge(ServerConfig().bridge, connector=connector_for(conn))
+    server = create_server(ServerConfig(), bridge=bridge)
+    async with Client(server) as client:
+        result = await client.call_tool("godot_get_server_info", {})
+    assert result.structured_content["bridge"]["backend"]["csharp_build"] is True
