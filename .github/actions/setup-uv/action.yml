@@ -1,9 +1,9 @@
 name: Setup uv (pinned, cached)
 description: >
-  Install the pinned uv binary from the self-hosted runners' shared cache,
-  downloading it with hard timeouts on a cache miss. Replaces
-  astral-sh/setup-uv on the self-hosted pools, where the binary download
-  intermittently stalls for minutes (#750/#752).
+  Install the pinned uv binary. On Making Things / GitHub-hosted runners the
+  binary lands under $RUNNER_TEMP. On hybridindie-style self-hosted pools that
+  mount /runner/_work/_cache, the binary is reused from that shared cache
+  (avoids the astral-sh/setup-uv download stall #750/#752).
 
 inputs:
   version:
@@ -25,13 +25,18 @@ runs:
           *) echo "::error::unsupported runner arch $(uname -m)"; exit 1 ;;
         esac
         asset="uv-${target}.tar.gz"
-        bin_dir="/runner/_work/_cache/bin"
+        # Prefer the self-hosted shared PVC when writable; else runner temp
+        # (ubuntu-latest / Making Things cloud VM).
+        if [[ -d /runner/_work/_cache ]] && [[ -w /runner/_work/_cache ]]; then
+          bin_dir="/runner/_work/_cache/bin"
+        else
+          bin_dir="${RUNNER_TEMP:-/tmp}/making-things-uv-bin"
+        fi
         bin="${bin_dir}/uv-${version}"
         mkdir -p "$bin_dir"
         if [ ! -x "$bin" ] || ! "$bin" --version | grep -q " ${version}"; then
           tmp="$(mktemp -d)"
           installed=0
-          # GitHub first (actions already reach it), then the astral mirror.
           for base in \
             "https://github.com/astral-sh/uv/releases/download/${version}" \
             "https://releases.astral.sh/github/uv/releases/download/${version}"; do
@@ -39,8 +44,6 @@ runs:
                && timeout 30 curl -fsSL "$base/$asset.sha256" -o "$tmp/$asset.sha256"; then
               if (cd "$tmp" && sha256sum -c "$asset.sha256"); then
                 tar -xzf "$tmp/$asset" -C "$tmp"
-                # Atomic publish: concurrent cold-cache jobs on the shared PVC
-                # must never let a reader see a partially written binary.
                 tmp_bin="${bin}.tmp.$$"
                 install -m 0755 "$tmp/uv-${target}/uv" "$tmp_bin"
                 mv -f "$tmp_bin" "$bin"

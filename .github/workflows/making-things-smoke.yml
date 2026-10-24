@@ -1,6 +1,6 @@
-# Making Things fixture / diagnose / C# / trajectory smokes on GitHub-hosted runners
-# (does not require hybridindie self-hosted Godot runners).
-# Full upstream ci.yml / e2e.yml still need [self-hosted, godot] — see docs/making-things/ci-path.md
+# Making Things fixture / diagnose / C# / trajectory smokes on GitHub-hosted runners.
+# Full suite: ci.yml + e2e.yml also default to ubuntu-latest (MT-3); optional
+# self-hosted override via MT_CI_RUNS_ON / MT_E2E_RUNS_ON — see docs/making-things/ci-path.md
 name: making-things-smoke
 
 on:

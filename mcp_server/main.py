@@ -32,7 +32,10 @@ def main() -> None:
             "bridge auth DISABLED (GODOT_MCP_ALLOW_INSECURE_BRIDGE); "
             "any local process can drive the editor"
         )
-    logger.info("starting making-things-godot (godot-mcp morph)", extra={"transport": config.transport})
+    logger.info(
+        "starting making-things-godot (godot-mcp morph)",
+        extra={"transport": config.transport},
+    )
 
     server = create_server(config)
     try:

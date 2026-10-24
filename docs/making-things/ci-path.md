@@ -1,58 +1,56 @@
 # CI path (Making Things fork)
 
-## What is green on GitHub-hosted runners
+## What runs where (MT-3)
 
-Workflow: `.github/workflows/making-things-smoke.yml` (`ubuntu-latest`)
+| Workflow | Default runner | What it covers |
+|----------|----------------|----------------|
+| `making-things-smoke.yml` | `ubuntu-latest` | Fixture import, diagnose, C# mono smoke, trajectory harness |
+| `ci.yml` | `ubuntu-latest` via `MT_CI_RUNS_ON` default | ruff · mypy · full `pytest -q` (Godot tests skipif) · camelCase · **Godot 4.4 floor** |
+| `e2e.yml` | `ubuntu-latest` via `MT_E2E_RUNS_ON` default | Live editor integration + play-session e2e under **xvfb** (downloads Godot 4.7.2) |
 
-| Job | What it runs |
-|-----|----------------|
-| `godot-import-diagnose` | Download Godot **standard** 4.7.2 → fixture import → `scripts/diagnose_fixture_smoke.sh` |
-| `python-unit-mt` | `uv sync` + expanded pytest (unit + contract Making Things surface) |
-| `csharp-mono-smoke` | .NET 8 + Godot **mono** 4.7.2 → `scripts/csharp_fixture_smoke.sh` |
-| `trajectory-harness` | `uv run python -m evals.making_things_trajectory` (scripted; no LLM) |
+Upstream hybridindie labels (`[self-hosted, linux, hybridindie]`, `[self-hosted, godot]`) are **no longer required**. Jobs no longer sit queued forever on this fork.
 
-## What needs self-hosted labels (upstream hybridindie)
+### Optional self-hosted override
 
-These workflows are inherited from hybridindie and **will not run** on this fork until matching runners exist:
+Set repo Actions variables (JSON arrays) when you attach a runner — see
+[`self-hosted-runner.md`](./self-hosted-runner.md):
 
-| Workflow | Labels | Typical command once runners exist |
-|----------|--------|--------------------------------------|
-| `ci.yml` | `[self-hosted, linux, hybridindie]` and `[self-hosted, godot]` | Full lint/type/unit/contract matrix |
-| `e2e.yml` | `[self-hosted, godot]` | Live editor e2e (play sessions, xvfb) |
-| Eval runners | `godot-eval` (see `e2e.yml` comments) | LLM agent harness (lives in **godot-agents**) |
+```text
+MT_CI_RUNS_ON  = ["self-hosted","making-things","godot"]
+MT_E2E_RUNS_ON = ["self-hosted","making-things","godot"]
+GODOT_BIN      = /opt/godot/godot
+```
 
-### Exact local / self-hosted commands
+Bootstrap: `bash scripts/ci/setup-github-runner.sh` (needs `RUNNER_TOKEN` from the GitHub UI).
+
+## Exact local commands
 
 ```bash
-# Making Things cloud-equivalent
 uv sync --frozen
 export GODOT_MCP_ALLOW_INSECURE_BRIDGE=1
-uv run pytest tests/unit tests/contract -q --tb=line
 
-# Live e2e subset (needs DISPLAY / xvfb-run + GODOT_BIN)
+# ci.yml equivalent (no Godot)
+bash scripts/ci/check-no-skipped-tests.sh
+uv run ruff check .
+uv run mypy
+uv run pytest -q
+
+# e2e.yml equivalent
 export GODOT_BIN=$HOME/godot/Godot_v4.7.2-stable_linux.x86_64
-xvfb-run -a uv run pytest \
-  tests/integration/test_set_live_property_e2e.py \
-  tests/integration/test_game_output_e2e.py \
-  tests/integration/test_mutation_e2e.py \
-  tests/integration/test_runtime_inspect_e2e.py \
-  -q --tb=line
+xvfb-run -a --server-args="-screen 0 1280x1024x24" \
+  uv run pytest -q tests/integration \
+  tests/contract/test_addon_guards.py \
+  tests/contract/test_addon_handshake.py \
+  tests/contract/test_router_refactor.py \
+  tests/contract/test_undo_threshold.py
 
-# Full upstream-style suite (self-hosted godot runner)
-xvfb-run -a uv run pytest -q --tb=line
-
-# C# Phase 2
-export GODOT_MCP_GODOT_BIN=$HOME/godot/Godot_v4.7.2-stable_mono_linux_x86_64/Godot_v4.7.2-stable_mono_linux.x86_64
-export PATH="$HOME/.dotnet:$PATH"
+# Making Things extras
 bash scripts/csharp_fixture_smoke.sh
-
-# Trajectory (non-LLM)
 uv run python -m evals.making_things_trajectory
-uv run python -m evals.instruction_staleness --static
 ```
 
 ## Honesty
 
-- Fork CI does **not** claim full upstream e2e parity.
-- `csharp_build` is green when mono + .NET SDK are present (Phase 2 smoke).
-- LLM agent trajectory evals are **not** in this repo; see `evals/README.md` and `evals/making_things_trajectory.py`.
+- Default GH-hosted `ci` + `e2e` **do** claim full upstream suite coverage (with Godot downloaded on e2e/floor jobs). They cost more Actions minutes than a dedicated runner.
+- `making-things-smoke` remains the fast PR signal; `ci`/`e2e` are the complete gates.
+- LLM agent evals are **not** in this repo (godot-agents).

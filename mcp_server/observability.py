@@ -36,7 +36,7 @@ def record_event(
 ) -> dict[str, Any]:
     """Append a structured event; returns the stored event (with seq)."""
     global _seq
-    event = {
+    event: dict[str, Any] = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "source": source,
         "level": level,
