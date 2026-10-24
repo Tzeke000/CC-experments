@@ -1,45 +1,32 @@
-# Evals (server self-analysis + Making Things scripted trajectory)
+# Evals
 
 `evals/` holds:
 
-1. **Instruction Staleness Verifier** — static analysis of godot-mcp's *own*
-   tool docs vs. the addon's bridge handler registrations.
-2. **Making Things trajectory harness** (`making_things_trajectory.py`) — a
-   **non-LLM** checklist that runs the diagnose smoke + structural gates an
-   agent would need. Not a substitute for LLM agent evals.
+1. **Instruction Staleness Verifier** — static analysis of tool docs vs addon handlers.
+2. **Making Things trajectory harness** (`making_things_trajectory.py`) — non-LLM
+   structural + diagnose smoke checklist.
+3. **Making Things agent evals** (`mt_agent/`) — **MT-4** multi-step diagnose /
+   playtest / import cases with mock (always) and optional live LLM tool-loop.
+   See [`docs/making-things/agent-evals.md`](../docs/making-things/agent-evals.md).
 
-The LLM eval **harness** (agents, task suites, variant A/B testing, transition/
-composition/negative/batch runners, results archives) is a consumer concern and
-lives in **godot-agents** as the self-contained `godot_agent_harness` package
-(godot-agents#481, moved in #383). It imports `godot_editor_mcp` only via the
-published wheel — no cross-repo source imports.
-
-**Blocker / next step for LLM trajectories:** pin a `diagnose_broken_script`
-(and `playtest_loop` + `set_live_property`) case in godot-agents against this
-fork's wheel; this repo intentionally does not vendor that harness.
+The historical upstream LLM harness modules (`llm_eval_v2`, `ollama_agent`, …)
+moved to **godot-agents** (`godot_agent_harness`). That repo is not vendored here
+(and was not clonable from this environment). MT-4 pins Making Things cases
+locally instead of depending on it.
 
 ## Usage
 
 ```bash
-# Static analysis: bridge.send()/route() cmd_* vs addon handlers["cmd_*"] + doc drift
+# Server self-analysis
 uv run python -m evals.instruction_staleness --static
 
-# Runtime verification: call each shared cmd_* through the bridge
-uv run python -m evals.instruction_staleness --runtime
-
-# Both
-uv run python -m evals.instruction_staleness --all
-
-# Making Things scripted trajectory (diagnose smoke + skills/prompts present)
+# Non-LLM Making Things checklist
 uv run python -m evals.making_things_trajectory
+
+# MT-4 agent cases (mock — no keys)
+uv run python -m evals.mt_agent.runner --mode mock
+uv run pytest tests/unit/test_mt_agent_evals.py -q
+
+# MT-4 live LLM (needs OPENAI_API_KEY or MAKING_THINGS_LLM_API_KEY)
+uv run python -m evals.mt_agent.runner --mode live
 ```
-
-## Why the harness moved
-
-- godot-mcp is **game-agnostic and consumer-independent**; the harness evaluated
-  *agents* (OllamaAgent, CloudAgent, LangGraph-side consumers), not the server.
-- godot-agents owns the eval agents, telemetry, and the unified "Godot AI"
-  experiment; vendoring the harness there (with the #276 bridge topology fix —
-  `serve()` + addon-dials) keeps this repo's surface generic.
-- Server-side safety gates (`confirm`, `dry_run`, toolset gating) are exercised
-  by `tests/contract/` here, not by LLM-run trials.

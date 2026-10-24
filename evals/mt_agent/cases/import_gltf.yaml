@@ -1,0 +1,35 @@
+id: import_gltf
+title: Import glTF and inspect resulting nodes
+prompt: |
+  Import a fixture glTF into the Making Things Godot project and verify nodes appear:
+  1) enable asset / inspection toolsets as needed
+  2) import fixtures/godot_project/art/sample.glb (or triangle.glb) via godot_asset_import_asset
+  3) rescan / wait for import status if needed
+  4) inspect the scene tree or imported scene for expected nodes
+  Prefer glTF conventions from godot://conventions/blender; do not enable Goblend unless asked.
+skills:
+  - making-things-godot-blender-import
+prompts:
+  - fix_import
+expected_tools:
+  - godot_enable_toolset
+  - godot_asset_import_asset
+  - godot_inspection_get_scene_tree
+required_subsequence:
+  - godot_asset_import_asset
+pass_criteria:
+  - import_reports_ok_or_pending
+  - scene_tree_mentions_imported_asset
+mock_script:
+  - tool: godot_enable_toolset
+    arguments: { category: asset }
+  - tool: godot_enable_toolset
+    arguments: { category: inspection }
+  - tool: godot_asset_import_asset
+    arguments:
+      source: fixtures/godot_project/art/sample.glb
+      target_path: res://art/sample_eval.glb
+  - tool: godot_asset_import_get_status
+    arguments: { path: res://art/sample_eval.glb }
+  - tool: godot_inspection_get_scene_tree
+    arguments: {}

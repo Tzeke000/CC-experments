@@ -7,11 +7,12 @@ concern — it now lives in ``godot_agent_harness`` inside godot-agents
 *gone* in this repo:
 
 - Stays: ``evals/instruction_staleness.py`` — server self-analysis of its
-  own tool docs vs. bridge handlers (never references an agent); and
+  own tool docs vs. bridge handlers (never references an agent);
   ``evals/making_things_trajectory.py`` — Making Things non-LLM scripted
-  trajectory (not an LLM agent harness).
-- Gone: every LLM harness module, the ``archive/`` / ``results/`` artifacts,
-  the moved tests, and any ``import evals`` reference to a moved module.
+  trajectory; and ``evals/mt_agent/`` — Making Things MT-4 multi-step agent
+  cases (mock + optional live LLM; not the moved godot-agents modules).
+- Gone: the *moved* LLM harness module names (``llm_eval_v2``, ``ollama_agent``,
+  …), ``archive/`` / ``results/`` artifacts, and any ``import evals`` of those.
 """
 
 from __future__ import annotations
@@ -48,12 +49,15 @@ MOVED_TESTS = {
     "test_eval_variants.py",
 }
 
-# evals/ keeps exactly these files (plus this guard's subject module).
+# Top-level remnants that must exist.
 EXPECTED_EVALS_FILES = {
     "instruction_staleness.py",
     "making_things_trajectory.py",
     "README.md",
 }
+
+# Making Things MT-4 agent eval package (allowed nested tree).
+ALLOWED_EVALS_PREFIXES = ("mt_agent/",)
 
 # An ``import evals`` / ``from evals`` statement, capturing the import list
 # (comma names, ``as`` aliases, single-line paren groups) or submodule path.
@@ -90,15 +94,26 @@ def _evals_files() -> set[str]:
 
 
 def test_evals_dir_holds_only_server_self_analysis() -> None:
-    """evals/ contains exactly the staleness verifier + its README."""
+    """evals/ holds staleness + MT trajectory + optional mt_agent/ package."""
     assert EVALS_DIR.is_dir(), "evals/ directory must exist for instruction_staleness"
     files = _evals_files()
-    unexpected = sorted(files - EXPECTED_EVALS_FILES)
-    assert not unexpected, (
-        f"Harness files remain in evals/ after the move to godot-agents (issue #383): {unexpected}"
-    )
     missing = sorted(EXPECTED_EVALS_FILES - files)
     assert not missing, f"Expected remnant files missing from evals/: {missing}"
+    unexpected = sorted(
+        f
+        for f in files - EXPECTED_EVALS_FILES
+        if not any(f.startswith(prefix) for prefix in ALLOWED_EVALS_PREFIXES)
+    )
+    assert not unexpected, (
+        f"Unexpected evals/ files (not remnant, not mt_agent/): {unexpected}"
+    )
+    # Forbid resurrecting moved godot-agents module basenames under evals/.
+    banned = sorted(
+        f
+        for f in files
+        if Path(f).stem in MOVED_MODULES or Path(f).name in {f"{m}.py" for m in MOVED_MODULES}
+    )
+    assert not banned, f"Moved godot-agents harness modules must not return: {banned}"
 
 
 def test_moved_eval_tests_are_gone() -> None:

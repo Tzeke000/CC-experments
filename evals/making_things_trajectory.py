@@ -154,16 +154,15 @@ def main() -> int:
     if failures:
         print(f"\n{len(failures)} failure(s).", file=sys.stderr)
         print(
-            "LLM multi-step agent trajectories: use godot-agents "
-            "`godot_agent_harness` (not vendored here). Next step: pin a "
-            "diagnose_broken_script case there against this fork's wheel.",
+            "For multi-step / LLM agent cases see evals/mt_agent/ "
+            "(docs/making-things/agent-evals.md).",
             file=sys.stderr,
         )
         return 1
     print("\nMaking Things trajectory harness: OK")
     print(
-        "Note: full LLM agent evals remain in godot-agents; this harness covers "
-        "the scripted diagnose trajectory + static instruction staleness."
+        "Note: multi-step agent cases live in evals/mt_agent/ "
+        "(mock always; live LLM needs API keys)."
     )
     return 0
 

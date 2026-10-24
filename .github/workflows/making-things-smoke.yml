@@ -67,6 +67,10 @@ jobs:
             tests/contract/test_diagnostics_contract.py \
             tests/integration/test_phase3_eval.py \
             -q --tb=line
+      - name: MT-4 agent eval mock runner
+        env:
+          GODOT_MCP_ALLOW_INSECURE_BRIDGE: "1"
+        run: uv run python -m evals.mt_agent.runner --mode mock
 
   csharp-mono-smoke:
     runs-on: ubuntu-latest

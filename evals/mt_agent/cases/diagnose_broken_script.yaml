@@ -1,0 +1,45 @@
+id: diagnose_broken_script
+title: Diagnose and fix a broken GDScript
+prompt: |
+  The Godot project under fixtures/godot_project has a script with a syntax error.
+  Using Godot Editor MCP tools only:
+  1) enable the scripts toolset
+  2) write or locate the broken script
+  3) call godot_scripts_get_parse_errors and report the error location
+  4) fix the script via godot_scripts_write
+  5) re-check parse errors are empty
+  Never claim success while parse errors remain.
+skills:
+  - making-things-godot-observability
+  - making-things-godot-inspect-fix
+related_docs:
+  - docs/making-things/diagnose-broken-script.md
+expected_tools:
+  - godot_enable_toolset
+  - godot_scripts_write
+  - godot_scripts_get_parse_errors
+  - godot_scripts_write
+  - godot_scripts_get_parse_errors
+# Subsequence match: these must appear in order (extra enable/list calls allowed).
+required_subsequence:
+  - godot_scripts_get_parse_errors
+  - godot_scripts_write
+  - godot_scripts_get_parse_errors
+pass_criteria:
+  - parse_errors_empty_after_fix
+  - never_claim_success_while_errors
+mock_script:
+  - tool: godot_enable_toolset
+    arguments: { category: scripts }
+  - tool: godot_scripts_write
+    arguments:
+      script_path: res://scripts/_eval_broken.gd
+      content: "extends Node\nfunc _ready(\n\tprint(\"broken\")\n"
+  - tool: godot_scripts_get_parse_errors
+    arguments: { script_path: res://scripts/_eval_broken.gd }
+  - tool: godot_scripts_write
+    arguments:
+      script_path: res://scripts/_eval_broken.gd
+      content: "extends Node\nfunc _ready() -> void:\n\tprint(\"ok\")\n"
+  - tool: godot_scripts_get_parse_errors
+    arguments: { script_path: res://scripts/_eval_broken.gd }
