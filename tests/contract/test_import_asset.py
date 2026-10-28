@@ -101,6 +101,47 @@ def _responder(cmd: CommandEnvelope) -> ResponseEnvelope | None:
                     "type": "Texture2D",
                 },
             )
+        case "cmd_reimport_assets":
+            return ResponseEnvelope.success(
+                cmd.id,
+                {
+                    "reimported": True,
+                    "paths": list(p.get("paths") or []),
+                    "missing": [],
+                    "scan_deferred": False,
+                    "scanning": False,
+                    "hint": "Reimport queued.",
+                },
+            )
+        case "cmd_diagnose_import":
+            return ResponseEnvelope.success(
+                cmd.id,
+                {
+                    "target_path": p["target_path"],
+                    "file_exists": True,
+                    "sidecar_present": True,
+                    "scanning": False,
+                    "detected_type": "PackedScene",
+                    "remap_type": "PackedScene",
+                    "importer": "scene",
+                    "gltf_pipeline_enabled": True,
+                    "gltf_summary": {
+                        "collision_extras": [
+                            {"node": "TriangleRoot", "collision": "trimesh"}
+                        ],
+                        "name_overrides": [
+                            {"node": "TriangleRoot", "name_override": "FixtureTriangle"}
+                        ],
+                        "suffix_hits": [],
+                        "node_count": 1,
+                    },
+                    "issues": [],
+                    "hints": [],
+                    "ready": True,
+                    "reason": None,
+                    "hint": "Import looks ready — still verify with scene tree.",
+                },
+            )
     return ResponseEnvelope.failure(cmd.id, "VALIDATION_ERROR", "unexpected")
 
 
@@ -131,6 +172,8 @@ async def test_gated_in_asset_import_toolset() -> None:
         "godot_asset_import_asset",
         "godot_asset_import_create_material_from_textures",
         "godot_asset_import_get_status",
+        "godot_asset_import_reimport",
+        "godot_asset_import_diagnose",
     } <= names
 
 
@@ -538,3 +581,69 @@ async def test_import_wav_loop_mode_applied() -> None:
     settings = sent.params["import_settings"]
     assert settings["loop_mode"] == 1
     assert settings["loop_begin"] == 0
+
+
+async def test_reimport_queues_paths() -> None:
+    server, conn = _build()
+    async with Client(server) as client:
+        await client.call_tool("godot_enable_toolset", {"category": "asset_import"})
+        result = await client.call_tool(
+            "godot_asset_import_reimport",
+            {"paths": ["res://art/triangle.gltf"]},
+        )
+    sc = result.structured_content
+    assert sc["reimported"] is True
+    assert sc["paths"] == ["res://art/triangle.gltf"]
+    assert sc["missing"] == []
+    assert "cmd_reimport_assets" in _commands(conn)
+
+
+async def test_reimport_dry_run_skips_bridge() -> None:
+    server, conn = _build()
+    async with Client(server) as client:
+        await client.call_tool("godot_enable_toolset", {"category": "asset_import"})
+        result = await client.call_tool(
+            "godot_asset_import_reimport",
+            {"paths": ["res://art/triangle.gltf"], "dry_run": True},
+        )
+    assert result.structured_content["dry_run"] is True
+    assert result.structured_content["reimported"] is False
+    assert "cmd_reimport_assets" not in _commands(conn)
+
+
+async def test_diagnose_import_returns_honesty_fields() -> None:
+    server, conn = _build()
+    async with Client(server) as client:
+        await client.call_tool("godot_enable_toolset", {"category": "asset_import"})
+        result = await client.call_tool(
+            "godot_asset_import_diagnose",
+            {"target_path": "res://art/triangle.gltf"},
+        )
+    sc = result.structured_content
+    assert sc["ready"] is True
+    assert sc["sidecar_present"] is True
+    assert sc["gltf_pipeline_enabled"] is True
+    assert sc["gltf_summary"]["collision_extras"][0]["collision"] == "trimesh"
+    assert "cmd_diagnose_import" in _commands(conn)
+
+
+async def test_diagnose_import_is_read_only() -> None:
+    server, _ = _build()
+    async with Client(server) as client:
+        await client.call_tool("godot_enable_toolset", {"category": "asset_import"})
+        tool = next(
+            t for t in await client.list_tools() if t.name == "godot_asset_import_diagnose"
+        )
+    assert tool.meta is not None and tool.meta.get("safety_class") == "read_only"
+
+
+async def test_reimport_is_mutating() -> None:
+    server, _ = _build()
+    async with Client(server) as client:
+        await client.call_tool("godot_enable_toolset", {"category": "asset_import"})
+        tool = next(
+            t for t in await client.list_tools() if t.name == "godot_asset_import_reimport"
+        )
+    assert tool.meta is not None and tool.meta.get("safety_class") == "mutating"
+
+

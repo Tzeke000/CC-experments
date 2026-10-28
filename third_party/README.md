@@ -1,9 +1,16 @@
 # Third-party Blender → Godot pipelines (decision E)
 
-Both options are **in v1**. Default interchange remains **glTF/glb** (decision D).
-These addons add collision / materials / nested-scene convenience on top.
+Default interchange remains **glTF/glb** (decision D). Making Things ships an
+MIT Blender helper plus the MIT Godot extras runtime; Goblend stays optional GPL.
 
 ## Chosen paths
+
+### 0. Making Things Blender export helpers (MIT) — default agent path
+
+- `third_party/mt_blender_export/` — Godot name suffixes, `collision` /
+  `name_override` custom properties (gltf_pipeline extras), Export glTF for Godot
+- Install in Blender 3.6+ via Preferences → Add-ons → Install (see that folder’s README)
+- Does **not** replace Goblend or the paid Blender-Godot Pipeline panel
 
 ### 1. Goblend (GPL-3.0) — full Blender↔Godot export UX
 

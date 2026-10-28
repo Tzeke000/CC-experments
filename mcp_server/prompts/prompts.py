@@ -651,7 +651,7 @@ def _register_fix_import(mcp: FastMCP) -> str:
         name="fix_import",
         description=(
             "Making Things: Blender→Godot glTF import workflow — conventions, "
-            "place asset, reimport, inspect tree. Goblend is optional GPL."
+            "import/reimport, diagnose extras/sidecar, inspect tree. Goblend is optional GPL."
         ),
     )
     def fix_import(asset_path: str = "res://art/sample.glb") -> list[Message]:
@@ -662,14 +662,17 @@ def _register_fix_import(mcp: FastMCP) -> str:
                 content=(
                     f"Import / verify Blender asset '{asset_path}' into Godot.\n\n"
                     "1) Read godot://conventions/blender (or godot_read_resource)\n"
-                    "2) Enable toolsets: asset_import, inspection, project\n"
-                    "3) If the file is outside the project, godot_asset_import_asset(...)\n"
-                    "   else ensure it is under res://art/ and trigger reimport / scan\n"
-                    "4) godot_asset_import_get_status / await filesystem idle\n"
-                    "5) godot_inspection_get_scene_tree after opening the imported scene\n"
-                    "6) Confirm expected node names; do not claim success without tree evidence\n"
-                    "Pipelines: MIT addons/gltf_pipeline (extras). Goblend under "
-                    "third_party/goblend is GPL — optional only."
+                    "2) Enable toolsets: asset_import, inspection, scene_edit\n"
+                    "3) If the file is outside the project, godot_asset_import_asset(..., "
+                    "wait_for_scan=True)\n"
+                    "   else godot_asset_import_reimport(paths=['{asset_path}'])\n"
+                    "4) godot_asset_import_diagnose(target_path='{asset_path}') — resolve "
+                    "issues[] / hints[] (sidecar, scanning, gltf_pipeline, extras)\n"
+                    "5) godot_asset_import_get_status until imported and not scanning\n"
+                    "6) Open imported scene; godot_inspection_get_scene_tree — confirm names\n"
+                    "7) Never claim success without tree evidence; ready≠verified\n"
+                    "Blender: third_party/mt_blender_export (MIT). Godot extras: "
+                    "addons/gltf_pipeline (MIT). Goblend third_party/goblend is GPL — optional."
                 ),
             ),
         ]

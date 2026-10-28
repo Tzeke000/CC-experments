@@ -29,6 +29,7 @@ See `third_party/README.md`.
 
 | Path | Upstream | License | Notes |
 |------|----------|---------|-------|
+| `third_party/mt_blender_export/` | Making Things (original) | MIT | Blender helpers: Godot suffixes, gltf_pipeline extras, export preset |
 | `third_party/goblend/` | https://github.com/Togira123/Goblend-Export-Addon | GPL-3.0 | Optional Blender+Godot export pipeline; keep separate from MIT code |
 | `third_party/gltf_pipeline/` | https://github.com/zheqd/blender-godot-pipeline (`addons/gltf_pipeline`) | MIT | Godot-side GLTFDocumentExtension for Blender-Godot Pipeline extras; Blender authoring addon is a separate paid product |
 

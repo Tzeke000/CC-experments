@@ -18,6 +18,8 @@ func register(handlers: Dictionary) -> void:
 	handlers["cmd_import_asset"] = _cmd_import_asset
 	handlers["cmd_create_material_from_textures"] = _cmd_create_material_from_textures
 	handlers["cmd_get_import_status"] = _cmd_get_import_status
+	handlers["cmd_reimport_assets"] = _cmd_reimport_assets
+	handlers["cmd_diagnose_import"] = _cmd_diagnose_import
 
 
 # -- helpers -----------------------------------------------------------------
@@ -53,7 +55,9 @@ func _detect_type(path: String) -> String:
 	match ext:
 		"png", "jpg", "jpeg", "webp", "svg":
 			return "Texture2D"
-		"glb", "gltf", "fbx":
+		# .blend imports via Blender→glTF in the editor (PackedScene). Prefer
+		# committing .glb/.gltf so teammates need not install Blender.
+		"glb", "gltf", "fbx", "blend":
 			return "PackedScene"
 		"obj":
 			return "Mesh"
@@ -74,6 +78,88 @@ func _detect_type(path: String) -> String:
 		"gdshader":
 			return "Shader"
 	return ""
+
+
+## Godot built-in import name suffixes (docs: node type customization).
+const _GODOT_SUFFIXES := [
+	"-colonly", "-convcolonly", "-convcol", "-col", "-noimp", "-navmesh",
+	"-occonly", "-occ", "-rigid", "-vehicle", "-wheel", "-alpha", "-vcol",
+]
+
+
+func _suffix_hits(name: String) -> Array:
+	var hits: Array = []
+	var lower := name.to_lower()
+	for suffix in _GODOT_SUFFIXES:
+		if lower.ends_with(suffix) or lower.ends_with(suffix.replace("-", "_")) \
+				or lower.ends_with(suffix.replace("-", "$")):
+			hits.append(suffix)
+	# Animation loop tokens are prefix/suffix without requiring a hyphen.
+	if lower.begins_with("loop") or lower.ends_with("loop") \
+			or lower.begins_with("cycle") or lower.ends_with("cycle"):
+		hits.append("loop/cycle")
+	return hits
+
+
+func _gltf_pipeline_enabled() -> bool:
+	# EditorInterface.is_plugin_enabled takes the addon folder name (Godot 4.x).
+	if EditorInterface.has_method("is_plugin_enabled"):
+		if EditorInterface.is_plugin_enabled("gltf_pipeline"):
+			return true
+	# Fallback: enabled plugins list in project settings.
+	var enabled: PackedStringArray = ProjectSettings.get_setting(
+		"editor_plugins/enabled", PackedStringArray()
+	)
+	for entry in enabled:
+		var s := str(entry)
+		if s.contains("gltf_pipeline"):
+			return true
+	return false
+
+
+func _read_gltf_json(abs_path: String) -> Variant:
+	if not FileAccess.file_exists(abs_path):
+		return null
+	var f := FileAccess.open(abs_path, FileAccess.READ)
+	if f == null:
+		return null
+	var text := f.get_as_text()
+	f.close()
+	var parsed: Variant = JSON.parse_string(text)
+	return parsed
+
+
+func _summarize_gltf_extras(doc: Dictionary) -> Dictionary:
+	var nodes_with_extras: Array = []
+	var collision_extras: Array = []
+	var suffix_hits: Array = []
+	var name_overrides: Array = []
+	var nodes: Array = doc.get("nodes", [])
+	for node in nodes:
+		if typeof(node) != TYPE_DICTIONARY:
+			continue
+		var n: Dictionary = node
+		var name := str(n.get("name", ""))
+		for hit in _suffix_hits(name):
+			suffix_hits.append({"node": name, "suffix": hit})
+		if not n.has("extras"):
+			continue
+		var extras: Variant = n["extras"]
+		if typeof(extras) != TYPE_DICTIONARY:
+			continue
+		var ex: Dictionary = extras
+		nodes_with_extras.append(name if not name.is_empty() else "(unnamed)")
+		if ex.has("collision"):
+			collision_extras.append({"node": name, "collision": str(ex["collision"])})
+		if ex.has("name_override"):
+			name_overrides.append({"node": name, "name_override": str(ex["name_override"])})
+	return {
+		"nodes_with_extras": nodes_with_extras,
+		"collision_extras": collision_extras,
+		"name_overrides": name_overrides,
+		"suffix_hits": suffix_hits,
+		"node_count": nodes.size(),
+	}
 
 
 # -- handlers ----------------------------------------------------------------
@@ -318,4 +404,148 @@ func _cmd_get_import_status(params: Dictionary) -> Dictionary:
 		# `imported: false` forever.
 		"scanning": EditorInterface.get_resource_filesystem().is_scanning(),
 		"reason": "rescan_in_flight" if EditorInterface.get_resource_filesystem().is_scanning() and not imported else null,
+	})
+
+
+func _cmd_reimport_assets(params: Dictionary) -> Dictionary:
+	## Force EditorFileSystem.reimport_files on one or more res:// paths so an
+	## agent can refresh Blender→Godot glTF after an in-place overwrite without
+	## guessing at rescan_filesystem side effects.
+	var raw_paths: Variant = params.get("paths", [])
+	if typeof(raw_paths) != TYPE_ARRAY and typeof(raw_paths) != TYPE_PACKED_STRING_ARRAY:
+		return _router._fail("VALIDATION_ERROR", "'paths' must be an array of res:// paths.")
+	if raw_paths.is_empty():
+		return _router._fail("VALIDATION_ERROR", "'paths' must contain at least one res:// path.")
+
+	var files := PackedStringArray()
+	var missing: Array = []
+	for item in raw_paths:
+		var path := str(item)
+		if not path.begins_with("res://"):
+			return _router._fail("VALIDATION_ERROR", "Each path must start with res:// (got '%s')." % path)
+		var abs := ProjectSettings.globalize_path(path)
+		if not FileAccess.file_exists(abs):
+			missing.append(path)
+			continue
+		files.append(path)
+
+	if files.is_empty():
+		return _router._fail(
+			"RESOURCE_NOT_FOUND",
+			"None of the requested paths exist on disk. Check paths[] and res:// mapping.",
+		)
+
+	var fs := EditorInterface.get_resource_filesystem()
+	fs.reimport_files(files)
+	# Also nudge a scan so brand-new sidecars / deps settle (#628 coalescing).
+	var scan_deferred := not ensure_scan(fs)
+	if scan_deferred:
+		_router.pending_rescan = true
+
+	return _router._ok({
+		"reimported": true,
+		"paths": Array(files),
+		"missing": missing,
+		"scan_deferred": scan_deferred,
+		"scanning": fs.is_scanning(),
+		"hint": (
+			"Reimport queued. Poll godot_asset_import_get_status / diagnose_import; "
+			+ "do not claim success without scene-tree evidence."
+		),
+	})
+
+
+func _cmd_diagnose_import(params: Dictionary) -> Dictionary:
+	## Agent-facing import diagnose loop: sidecar honesty, scan state, glTF
+	## extras/suffix summary, and whether MIT gltf_pipeline is enabled.
+	var target_path := str(params.get("target_path", ""))
+	if not target_path.begins_with("res://"):
+		return _router._fail("VALIDATION_ERROR", "target_path must start with res://.")
+
+	var issues: Array = []
+	var hints: Array = []
+	var abs_path := ProjectSettings.globalize_path(target_path)
+	var file_exists := FileAccess.file_exists(abs_path)
+	if not file_exists:
+		issues.append("FILE_MISSING")
+		hints.append("Place the asset under the project (e.g. res://art/) or call godot_asset_import_asset first.")
+
+	var sidecar_path := ProjectSettings.globalize_path(target_path + ".import")
+	var sidecar_present := FileAccess.file_exists(sidecar_path)
+	var remap_type := ""
+	var importer := ""
+	if sidecar_present:
+		var cfg := ConfigFile.new()
+		if cfg.load(target_path + ".import") == OK:
+			remap_type = str(cfg.get_value("remap", "type", ""))
+			importer = str(cfg.get_value("remap", "importer", ""))
+	elif file_exists:
+		issues.append("SIDECAR_MISSING")
+		hints.append("Editor has not finished importing — wait_for_scan / get_import_status, or reimport.")
+
+	var fs := EditorInterface.get_resource_filesystem()
+	var scanning := fs.is_scanning()
+	if scanning:
+		issues.append("RESCAN_IN_FLIGHT")
+		hints.append("Filesystem scan still running; status is provisional.")
+
+	var ext := target_path.get_extension().to_lower()
+	var detected_type := _detect_type(target_path)
+	if ext == "blend":
+		hints.append(
+			"Prefer committing .glb/.gltf. .blend requires Blender ≥3.5 on PATH "
+			+ "(Editor Settings → Filesystem → Import → Blender Path)."
+		)
+
+	var gltf_summary: Dictionary = {}
+	var extras_compatible := false
+	if ext == "gltf" and file_exists:
+		var doc: Variant = _read_gltf_json(abs_path)
+		if typeof(doc) == TYPE_DICTIONARY:
+			gltf_summary = _summarize_gltf_extras(doc)
+			extras_compatible = not gltf_summary.get("collision_extras", []).is_empty() \
+				or not gltf_summary.get("name_overrides", []).is_empty()
+			if extras_compatible and not _gltf_pipeline_enabled():
+				issues.append("PIPELINE_PLUGIN_OFF")
+				hints.append(
+					"glTF carries Pipeline extras but addons/gltf_pipeline is not enabled — "
+					+ "enable the MIT plugin or collisions/name_override will not apply."
+				)
+		else:
+			issues.append("GLTF_PARSE_FAILED")
+			hints.append("Could not parse .gltf JSON; check the file is valid glTF 2.0.")
+	elif ext == "glb" and file_exists:
+		hints.append(
+			"Binary .glb: extras not parsed here. Re-export as glTF Separate for diagnose, "
+			+ "or open the imported scene and inspect the tree."
+		)
+
+	var pipeline_enabled := _gltf_pipeline_enabled()
+	var ready := (
+		file_exists
+		and sidecar_present
+		and not scanning
+		and not issues.has("PIPELINE_PLUGIN_OFF")
+		and not issues.has("GLTF_PARSE_FAILED")
+	)
+
+	return _router._ok({
+		"target_path": target_path,
+		"file_exists": file_exists,
+		"sidecar_present": sidecar_present,
+		"scanning": scanning,
+		"detected_type": detected_type if not detected_type.is_empty() else null,
+		"remap_type": remap_type if not remap_type.is_empty() else null,
+		"importer": importer if not importer.is_empty() else null,
+		"gltf_pipeline_enabled": pipeline_enabled,
+		"gltf_summary": gltf_summary,
+		"issues": issues,
+		"hints": hints,
+		"ready": ready,
+		"reason": "rescan_in_flight" if scanning and not sidecar_present else null,
+		"hint": (
+			"Import looks ready — still verify with godot_inspection_get_scene_tree."
+			if ready
+			else "Import not ready; resolve issues[] / hints[] before claiming success."
+		),
 	})

@@ -107,8 +107,9 @@ TOOLSETS: dict[str, str] = {
     "an export (needs export templates).",
     DEBUGGER_TAG: "Debugger breakpoint control: set, remove, clear breakpoints and force "
     "breaks in a running game (needs a play session).",
-    ASSET_IMPORT_TAG: "Import external assets (local files or URLs) into the project and "
-    "assemble PBR materials from textures.",
+    ASSET_IMPORT_TAG: "Import / reimport external assets (local files or URLs), diagnose "
+    "Blender→Godot glTF imports (sidecar, extras, gltf_pipeline), and assemble PBR "
+    "materials from textures.",
     VISUAL_SHADER_TAG: "Create and edit Visual Shader node graphs: create shaders, add "
     "nodes, wire connections, and set node parameters.",
     PROJECT_SCAFFOLD_TAG: "Generate a project skeleton (directories, settings, autoloads, "

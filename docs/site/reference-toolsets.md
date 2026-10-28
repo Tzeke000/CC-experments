@@ -1,14 +1,14 @@
 ---
 type: index
 title: "Toolsets & tools"
-description: "Every tool in the 200-tool surface, grouped by toolset, with safety classes."
+description: "Every tool in the 202-tool surface, grouped by toolset, with safety classes."
 created: 2026-09-19
-updated: 2026-10-24
+updated: 2026-10-28
 ---
 
 # Toolsets & tools
 
-200 tools across 29 categories. Only `core` + `inspection` are enabled by default; enable the rest with `godot_enable_toolset(category)`, which returns the enabled tools' names and input schemas so a client that never refreshes its registry can still call them. `category` also accepts a bundle (`author` / `playtest` / `ship`) or a comma-separated list, so a whole workflow is one call (#653). Class meanings: [safety classes](reference-safety-classes.md).
+202 tools across 29 categories. Only `core` + `inspection` are enabled by default; enable the rest with `godot_enable_toolset(category)`, which returns the enabled tools' names and input schemas so a client that never refreshes its registry can still call them. `category` also accepts a bundle (`author` / `playtest` / `ship`) or a comma-separated list, so a whole workflow is one call (#653). Class meanings: [safety classes](reference-safety-classes.md).
 
 ## `analysis` — Static analysis: dependencies, signal flow, unused resources, circular deps, scene integrity.
 
@@ -42,15 +42,17 @@ updated: 2026-10-24
 | `godot_animation_list_animations` | read_only |
 | `godot_animation_set_blend_tree_node` | mutating |
 
-## `asset_import` — Import external assets (.png/.glb/.wav/…), create materials from textures, poll import status.
+## `asset_import` — Import / reimport external assets, diagnose Blender→Godot glTF (sidecar, extras, pipeline), create materials, poll status.
 
-3 tools.
+5 tools.
 
 | Tool | Class |
 |------|-------|
 | `godot_asset_import_asset` | mutating |
 | `godot_asset_import_create_material_from_textures` | mutating |
+| `godot_asset_import_diagnose` | read_only |
 | `godot_asset_import_get_status` | read_only |
+| `godot_asset_import_reimport` | mutating |
 
 ## `audio` — Audio players and AudioServer buses: add players, route buses, effects — with a verifiable layout read.
 
