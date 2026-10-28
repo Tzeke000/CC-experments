@@ -71,7 +71,12 @@ class MockToolSession:
             if path not in self.world.scripts:
                 raise RuntimeError(f"No script at {path}")
             errors = _parse_errors_for(content)
-            return {"script_path": path, "ok": not errors, "errors": errors, "rescan_pending": False}
+            return {
+                "script_path": path,
+                "ok": not errors,
+                "errors": errors,
+                "rescan_pending": False,
+            }
 
         if name == "godot_scripts_read":
             path = str(args["script_path"])

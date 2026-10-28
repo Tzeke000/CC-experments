@@ -30,7 +30,7 @@ from mcp_server.models.import_asset import (
     ImportStatusResult,
     ReimportAssetsResult,
 )
-from mcp_server.paths import ResPath
+from mcp_server.paths import ResPath, ResPathList
 from mcp_server.safety import MUTATING, READ_ONLY
 from mcp_server.tools._route import route
 
@@ -349,7 +349,7 @@ def register_import_asset(mcp: FastMCP, bridge: Bridge) -> None:
 
     @mcp.tool(meta=MUTATING, tags=ASSET_IMPORT)
     async def reimport(
-        paths: Annotated[list[ResPath], Field(min_length=1)],
+        paths: ResPathList,
         dry_run: bool = False,
         wait_for_scan: bool = False,
         timeout_ms: TimeoutMs = _SCAN_TIMEOUT_MS_DEFAULT,

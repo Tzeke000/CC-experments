@@ -611,6 +611,19 @@ async def test_reimport_dry_run_skips_bridge() -> None:
     assert "cmd_reimport_assets" not in _commands(conn)
 
 
+async def test_reimport_rejects_uncontained_path() -> None:
+    """ResPathList must reject escapes at the schema boundary (#637)."""
+    server, conn = _build()
+    async with Client(server) as client:
+        await client.call_tool("godot_enable_toolset", {"category": "asset_import"})
+        with pytest.raises(ToolError):
+            await client.call_tool(
+                "godot_asset_import_reimport",
+                {"paths": ["res://../evil.glb"]},
+            )
+    assert "cmd_reimport_assets" not in _commands(conn)
+
+
 async def test_diagnose_import_returns_honesty_fields() -> None:
     server, conn = _build()
     async with Client(server) as client:
