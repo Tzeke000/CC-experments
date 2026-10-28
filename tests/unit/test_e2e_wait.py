@@ -6,6 +6,9 @@ advances a fake clock and no real time passes.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+from typing import Any
+
 
 class _FakeTime:
     """A monotonic clock a fake ``sleep`` advances, so the budget is deterministic."""
@@ -68,24 +71,33 @@ async def test_wait_probe_connected_succeeds_when_connected_flips() -> None:
     calls = {"n": 0}
     original = godot_helpers.wait_until
 
-    async def _wait_until(pred, *, timeout, interval=0.25, sleep=None, clock=None):
+    async def _wait_until(
+        pred: Callable[[], Awaitable[bool] | bool],
+        *,
+        timeout: float,
+        interval: float = 0.25,
+        sleep: Callable[[float], Awaitable[None]] | None = None,
+        clock: Callable[[], float] | None = None,
+    ) -> bool:
         return await original(
             pred, timeout=timeout, interval=interval, sleep=fake.sleep, clock=fake.clock
         )
 
     class _Bridge:
-        async def send(self, command: str, params: dict | None = None) -> ResponseEnvelope:
+        async def send(
+            self, command: str, params: dict[str, Any] | None = None
+        ) -> ResponseEnvelope:
             assert command == "cmd_get_game_scene_tree"
             calls["n"] += 1
             return ResponseEnvelope.success(
                 "id", {"connected": calls["n"] >= 3, "tree": None}
             )
 
-    godot_helpers.wait_until = _wait_until  # type: ignore[assignment]
+    godot_helpers.wait_until = _wait_until
     try:
         await wait_probe_connected(_Bridge(), timeout=10.0, interval=1.0)
     finally:
-        godot_helpers.wait_until = original  # type: ignore[assignment]
+        godot_helpers.wait_until = original
     assert calls["n"] == 3
 
 
@@ -97,16 +109,25 @@ async def test_wait_probe_connected_fails_with_last_state() -> None:
     fake = _FakeTime()
     original = godot_helpers.wait_until
 
-    async def _wait_until(pred, *, timeout, interval=0.25, sleep=None, clock=None):
+    async def _wait_until(
+        pred: Callable[[], Awaitable[bool] | bool],
+        *,
+        timeout: float,
+        interval: float = 0.25,
+        sleep: Callable[[float], Awaitable[None]] | None = None,
+        clock: Callable[[], float] | None = None,
+    ) -> bool:
         return await original(
             pred, timeout=timeout, interval=interval, sleep=fake.sleep, clock=fake.clock
         )
 
     class _Bridge:
-        async def send(self, command: str, params: dict | None = None) -> ResponseEnvelope:
+        async def send(
+            self, command: str, params: dict[str, Any] | None = None
+        ) -> ResponseEnvelope:
             return ResponseEnvelope.success("id", {"connected": False, "playing": True})
 
-    godot_helpers.wait_until = _wait_until  # type: ignore[assignment]
+    godot_helpers.wait_until = _wait_until
     try:
         try:
             await wait_probe_connected(_Bridge(), timeout=2.0, interval=1.0)
@@ -119,4 +140,4 @@ async def test_wait_probe_connected_fails_with_last_state() -> None:
         assert "never connected" in message
         assert "playing" in message
     finally:
-        godot_helpers.wait_until = original  # type: ignore[assignment]
+        godot_helpers.wait_until = original
