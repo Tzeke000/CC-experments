@@ -99,20 +99,15 @@ def score_trajectory(
                 reasons.append("final get_parse_errors failed")
 
     if "never_claim_success_while_errors" in criteria:
-        # Structural: if any get_parse_errors returned errors, a later write must follow.
+        # Structural: if any get_parse_errors returned errors, a later clean
+        # re-check must appear in the trajectory.
         saw_errors = False
-        fixed_after = False
         for c in calls:
             if c.name == "godot_scripts_get_parse_errors":
                 data = c.result if isinstance(c.result, dict) else {}
                 errs = data.get("errors") or []
                 if errs or data.get("ok") is False:
                     saw_errors = True
-                    fixed_after = False
-                elif saw_errors and data.get("ok") is True and not errs:
-                    fixed_after = True
-            if saw_errors and c.name == "godot_scripts_write":
-                fixed_after = False  # write is the fix step; wait for re-check
         if saw_errors and not any(
             c.name == "godot_scripts_get_parse_errors"
             and isinstance(c.result, dict)

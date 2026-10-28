@@ -101,7 +101,8 @@ COMMON_TOOLSETS = (
     "- physics     → godot_physics_setup_body, godot_physics_setup_collision\n"
     "- resources_edit → godot_resources_edit_register_autoload, "
     "godot_resources_edit_create_resource\n"
-    "- asset_import → godot_asset_import_asset, godot_asset_import_create_material_from_textures"
+    "- asset_import → godot_asset_import_asset, godot_asset_import_reimport, "
+    "godot_asset_import_diagnose, godot_asset_import_create_material_from_textures"
 )
 
 SERVER_VS_ADDON = (

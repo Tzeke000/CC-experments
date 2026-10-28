@@ -27,7 +27,7 @@ from tests.fakes import FakeAddonConnection, connector_for
 pytestmark = pytest.mark.asyncio
 
 _TOOLS_DIR = pathlib.Path("mcp_server/tools")
-_CONTAINMENT_TYPES = {"ResPath", "ExportPath"}
+_CONTAINMENT_TYPES = {"ResPath", "ResPathList", "ExportPath"}
 
 # Every node-path parameter: a Godot node path (``Player/Gun``), NOT a ``res://``
 # file path, so containment does not apply. Everything else whose name contains

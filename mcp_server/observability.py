@@ -101,19 +101,88 @@ BLENDER_CONVENTIONS: dict[str, Any] = {
     "preferred_formats": [".glb", ".gltf"],
     "optional_blend": {
         "supported": True,
-        "requires": "Blender ≥3.5 on PATH; Editor Settings → Filesystem → Import → Blender Path",
+        "requires": (
+            "Blender ≥3.5 on PATH; "
+            "Editor Settings → Filesystem → Import → Blender Path"
+        ),
         "team_note": "Prefer committing glTF so teammates need not install Blender",
+        "godot_45_note": (
+            "Godot 4.5+ .blend import fails on Blender <3.5 "
+            "(unrecognized export_import_convert_lighting_mode)"
+        ),
+    },
+    "godot_name_suffixes": [
+        "-col",
+        "-convcol",
+        "-colonly",
+        "-convcolonly",
+        "-noimp",
+        "-navmesh",
+        "-occ",
+        "-occonly",
+        "-rigid",
+        "-vehicle",
+        "-wheel",
+        "-alpha",
+        "-vcol",
+        "loop/cycle (animation clip name)",
+    ],
+    "gltf_pipeline_extras": {
+        "collision": (
+            "trimesh|simple|box|sphere|capsule|cylinder "
+            "+ optional flags -r/-a/-m/-h/-c/-d"
+        ),
+        "name_override": "rename node on import",
+        "material_0..3": "surface override materials",
+        "script": "attach script + prop_string/prop_file",
+        "nav_mesh": "path to save NavigationRegion3D",
+        "packed_scene": "replace node with PackedScene instance",
+    },
+    "lods": {
+        "auto_for_scenes": True,
+        "note": (
+            "meshes/generate_lods defaults true for glTF scenes; "
+            "disable per-mesh if LODs look broken; OBJ needs Import As → Scene"
+        ),
+    },
+    "meshlibrary": {
+        "layout": (
+            "Node3D root → uniquely named MeshInstance3D children "
+            "(+ optional StaticBody3D/CollisionShape3D, NavigationRegion3D)"
+        ),
+        "pain": (
+            "duplicate mesh names collapse GridMap items; "
+            "prefer one .glb of uniquely named tiles + shared external material"
+        ),
     },
     "export_checklist": [
         "Apply object transforms before export",
         "Triangulate meshes (modifier or export option)",
         "Armature at rest pose; Export Deformation Bones Only for shape keys",
         "Enable Backface Culling on materials when appropriate",
+        "Enable Custom Properties / extras when using gltf_pipeline",
         "Agree on meters / Y-up conventions per project",
-        "Place under res://art/ then reimport / await EditorFileSystem idle",
-        "Inspect imported scene tree before claiming success",
+        "Place under res://art/ then godot_asset_import_reimport / await idle",
+        (
+            "godot_asset_import_diagnose then inspect imported scene tree "
+            "before claiming success"
+        ),
+    ],
+    "agent_tools": [
+        "godot_asset_import_asset",
+        "godot_asset_import_reimport",
+        "godot_asset_import_get_status",
+        "godot_asset_import_diagnose",
+        "godot_asset_import_create_material_from_textures",
+        "godot_scene_edit_rescan_filesystem",
     ],
     "pipelines": {
+        "mt_blender_export": {
+            "path": "third_party/mt_blender_export",
+            "license": "MIT",
+            "role": "Blender helpers: Godot suffixes, gltf_pipeline extras, export preset",
+            "default_in_fixtures": False,
+        },
         "gltf_pipeline": {
             "path": "third_party/gltf_pipeline",
             "license": "MIT",

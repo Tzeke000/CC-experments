@@ -16,7 +16,7 @@ import posixpath
 import re
 from typing import Annotated
 
-from pydantic import AfterValidator
+from pydantic import AfterValidator, Field
 
 RES_SCHEME = "res://"
 # A Windows drive prefix (``C:``/``c:``) — ``posixpath`` doesn't see it as
@@ -84,7 +84,16 @@ def ensure_export_path(value: str) -> str:
 
 # A contained ``res://`` file/directory path (see ensure_res_path).
 ResPath = Annotated[str, AfterValidator(ensure_res_path)]
+# Non-empty list of contained ``res://`` paths (each element runs ensure_res_path).
+ResPathList = Annotated[list[ResPath], Field(min_length=1)]
 # An export output path (see ensure_export_path).
 ExportPath = Annotated[str, AfterValidator(ensure_export_path)]
 
-__all__ = ["ExportPath", "ResPath", "ensure_export_path", "ensure_res_path", "escapes_res_root"]
+__all__ = [
+    "ExportPath",
+    "ResPath",
+    "ResPathList",
+    "ensure_export_path",
+    "ensure_res_path",
+    "escapes_res_root",
+]

@@ -24,11 +24,13 @@ from mcp_server.categories import ASSET_IMPORT_TAG
 from mcp_server.constraints import TimeoutMs
 from mcp_server.models.import_asset import (
     CreateMaterialResult,
+    DiagnoseImportResult,
     ImportAssetResult,
     ImportOptions,
     ImportStatusResult,
+    ReimportAssetsResult,
 )
-from mcp_server.paths import ResPath
+from mcp_server.paths import ResPath, ResPathList
 from mcp_server.safety import MUTATING, READ_ONLY
 from mcp_server.tools._route import route
 
@@ -43,6 +45,10 @@ _EXT_TO_TYPE: dict[str, str] = {
     ".svg": "Texture2D",
     ".glb": "PackedScene",
     ".gltf": "PackedScene",
+    # Editor imports .blend via Blender→glTF (PackedScene). Prefer committing
+    # .glb/.gltf so teammates need not install Blender (Godot ≥4.5 needs Blender
+    # ≥3.5; older Blender fails on export_import_convert_lighting_mode).
+    ".blend": "PackedScene",
     ".obj": "Mesh",
     ".fbx": "PackedScene",
     ".wav": "AudioStreamWAV",
@@ -190,25 +196,27 @@ def register_import_asset(mcp: FastMCP, bridge: Bridge) -> None:
         wait_for_scan: bool = False,
         timeout_ms: TimeoutMs = _SCAN_TIMEOUT_MS_DEFAULT,
     ) -> ImportAssetResult:
-        """Bring an external file into the Godot project.
+        """Copy an external file into the Godot project and trigger import.
 
-        ``source`` may be a local filesystem path or an HTTP(S) URL.  The file is
-        copied into ``target_path`` (``res://…``) and the editor filesystem is
-        updated so Godot imports it on the next scan.
+        Prefer ``.glb``/``.gltf`` under ``res://art/`` for Blender→Godot (see
+        ``godot://conventions/blender``). ``imported: true`` means the **copy**
+        landed — not that the ``.import`` sidecar exists yet. Use
+        ``wait_for_scan=true``, ``get_import_status``, or ``diagnose_import``
+        before claiming success; then open the scene and inspect the tree.
 
-        ``options`` (optional dict):
+        ``source`` may be a local filesystem path or an HTTP(S) URL.
+
+        ``options`` (optional):
         - ``overwrite`` (bool, default ``False``)
         - ``import_settings`` (dict, type-specific — e.g.
           ``{"type": "Texture2D", "compress": "lossy"}``). For a ``.wav``
           (AudioStreamWAV): ``{"loop_mode": 1, "loop_begin": 0, "loop_end": N}``
-          (#418) — looping music/ambience through the MCP surface; the loop
-          config lands in the ``.import`` sidecar and the artifact is reimported
-          (``loop_applied`` in the result reports whether it was applied).
+          (#418) — loop config lands in the ``.import`` sidecar and reimports
+          (``loop_applied`` reports whether it was applied).
 
-        ``wait_for_scan`` (default ``False``): after copying, poll the import
-        status until the editor's async scan has produced the ``.import``
-        sidecar (up to ``timeout_ms``); ``scan_complete`` in the result reports
-        whether the import artifacts are ready (vs just the copy landing).
+        ``wait_for_scan`` (default ``False``): poll until the ``.import`` sidecar
+        exists (up to ``timeout_ms``); ``scan_complete`` reports readiness.
+        ``scan_deferred: true`` means a scan was already in flight (#628).
         """
         _require_res_path(target_path)
         opts = options or ImportOptions()
@@ -317,12 +325,12 @@ def register_import_asset(mcp: FastMCP, bridge: Bridge) -> None:
     ) -> ImportStatusResult:
         """Check whether ``target_path`` has been imported by the Godot editor.
 
-        Looks in ``.godot/imported/`` for the corresponding import file and
-        returns the detected type and last-modified time.
+        Looks for the ``.import`` sidecar (canonical signal) and returns type /
+        last-modified. ``scanning: true`` / ``reason: rescan_in_flight`` means
+        the status is provisional — do not treat as final failure.
 
-        ``wait_ms`` (default 0): if not yet imported, keep polling for that
-        many milliseconds first — useful right after ``import_asset``, whose
-        editor-side scan is asynchronous.
+        ``wait_ms`` (default 0): if not yet imported, poll that many ms first —
+        useful right after ``import_asset`` / ``reimport``.
         """
         _require_res_path(target_path)
         result = await route(bridge, "cmd_get_import_status", {"target_path": target_path})
@@ -337,4 +345,83 @@ def register_import_asset(mcp: FastMCP, bridge: Bridge) -> None:
             # #459/#453: the scan-in-flight state rides the status read.
             scanning=result.get("scanning", False),
             reason=result.get("reason"),
+        )
+
+    @mcp.tool(meta=MUTATING, tags=ASSET_IMPORT)
+    async def reimport(
+        paths: ResPathList,
+        dry_run: bool = False,
+        wait_for_scan: bool = False,
+        timeout_ms: TimeoutMs = _SCAN_TIMEOUT_MS_DEFAULT,
+    ) -> ReimportAssetsResult:
+        """Force Godot to reimport existing ``res://`` asset path(s).
+
+        Use after overwriting a Blender export in place (or when
+        ``diagnose_import`` reports a stale sidecar). Distinct from
+        ``rescan_filesystem`` (whole-project scan) and from ``import_asset``
+        (copy into the project).
+
+        Honesty: ``reimported: true`` means the editor **queued** reimport —
+        poll ``get_import_status`` / ``diagnose_import``, then inspect the
+        scene tree. ``missing`` lists paths that were not on disk.
+        """
+        for path in paths:
+            _require_res_path(path, field="paths")
+        if dry_run:
+            return ReimportAssetsResult(
+                reimported=False,
+                paths=list(paths),
+                dry_run=True,
+                hint="dry_run: no reimport queued.",
+            )
+        result = await route(bridge, "cmd_reimport_assets", {"paths": list(paths)})
+        scanning = bool(result.get("scanning", False))
+        if wait_for_scan:
+            # Prefer the first successfully queued path for the readiness poll.
+            for path in result.get("paths") or paths:
+                ready = await _poll_import_ready(bridge, path, timeout_ms)
+                if ready is not None:
+                    scanning = bool(ready.get("scanning", False))
+                    break
+        return ReimportAssetsResult(
+            reimported=result.get("reimported", True),
+            paths=list(result.get("paths") or paths),
+            missing=list(result.get("missing") or []),
+            scan_deferred=result.get("scan_deferred", False),
+            scanning=scanning,
+            dry_run=False,
+            hint=result.get("hint"),
+        )
+
+    @mcp.tool(meta=READ_ONLY, tags=ASSET_IMPORT)
+    async def diagnose_import(target_path: ResPath) -> DiagnoseImportResult:
+        """Diagnose a Blender→Godot (or general) asset import for agents.
+
+        Returns honesty fields: ``file_exists``, ``sidecar_present``,
+        ``scanning``, ``gltf_pipeline_enabled``, ``gltf_summary`` (extras /
+        Godot name-suffix hits for ``.gltf``), ``issues[]``, ``hints[]``, and
+        ``ready``. ``ready: true`` still requires scene-tree evidence before
+        claiming import success.
+
+        Prefer ``.gltf`` (Separate) when you need extras parsed; ``.glb`` gets
+        a limited summary. Enable MIT ``addons/gltf_pipeline`` when collision /
+        name_override extras are present.
+        """
+        _require_res_path(target_path)
+        result = await route(bridge, "cmd_diagnose_import", {"target_path": target_path})
+        return DiagnoseImportResult(
+            target_path=result.get("target_path", target_path),
+            file_exists=result.get("file_exists", False),
+            sidecar_present=result.get("sidecar_present", False),
+            scanning=result.get("scanning", False),
+            detected_type=result.get("detected_type"),
+            remap_type=result.get("remap_type"),
+            importer=result.get("importer"),
+            gltf_pipeline_enabled=result.get("gltf_pipeline_enabled", False),
+            gltf_summary=dict(result.get("gltf_summary") or {}),
+            issues=list(result.get("issues") or []),
+            hints=list(result.get("hints") or []),
+            ready=result.get("ready", False),
+            reason=result.get("reason"),
+            hint=result.get("hint"),
         )

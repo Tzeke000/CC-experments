@@ -50,3 +50,34 @@ class ImportStatusResult(BaseModel):
     # Stable reason token while pending: ``rescan_in_flight`` when not yet
     # imported and the scan is running.
     reason: str | None = None
+
+
+class ReimportAssetsResult(BaseModel):
+    """Result of forcing EditorFileSystem.reimport_files on res:// paths."""
+
+    reimported: bool = False
+    paths: list[str] = Field(default_factory=list)
+    missing: list[str] = Field(default_factory=list)
+    scan_deferred: bool = False
+    scanning: bool = False
+    dry_run: bool = False
+    hint: str | None = None
+
+
+class DiagnoseImportResult(BaseModel):
+    """Honest import diagnose payload for Blender→Godot agent loops."""
+
+    target_path: str
+    file_exists: bool = False
+    sidecar_present: bool = False
+    scanning: bool = False
+    detected_type: str | None = None
+    remap_type: str | None = None
+    importer: str | None = None
+    gltf_pipeline_enabled: bool = False
+    gltf_summary: dict[str, Any] = Field(default_factory=dict)
+    issues: list[str] = Field(default_factory=list)
+    hints: list[str] = Field(default_factory=list)
+    ready: bool = False
+    reason: str | None = None
+    hint: str | None = None
