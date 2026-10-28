@@ -72,7 +72,7 @@ async def test_wait_probe_connected_succeeds_when_connected_flips() -> None:
     original = godot_helpers.wait_until
 
     async def _wait_until(
-        pred: Callable[[], Awaitable[bool] | bool],
+        predicate: Callable[[], Awaitable[bool] | bool],
         *,
         timeout: float,
         interval: float = 0.25,
@@ -80,7 +80,11 @@ async def test_wait_probe_connected_succeeds_when_connected_flips() -> None:
         clock: Callable[[], float] | None = None,
     ) -> bool:
         return await original(
-            pred, timeout=timeout, interval=interval, sleep=fake.sleep, clock=fake.clock
+            predicate,
+            timeout=timeout,
+            interval=interval,
+            sleep=fake.sleep,
+            clock=fake.clock,
         )
 
     class _Bridge:
@@ -110,7 +114,7 @@ async def test_wait_probe_connected_fails_with_last_state() -> None:
     original = godot_helpers.wait_until
 
     async def _wait_until(
-        pred: Callable[[], Awaitable[bool] | bool],
+        predicate: Callable[[], Awaitable[bool] | bool],
         *,
         timeout: float,
         interval: float = 0.25,
@@ -118,7 +122,11 @@ async def test_wait_probe_connected_fails_with_last_state() -> None:
         clock: Callable[[], float] | None = None,
     ) -> bool:
         return await original(
-            pred, timeout=timeout, interval=interval, sleep=fake.sleep, clock=fake.clock
+            predicate,
+            timeout=timeout,
+            interval=interval,
+            sleep=fake.sleep,
+            clock=fake.clock,
         )
 
     class _Bridge:
