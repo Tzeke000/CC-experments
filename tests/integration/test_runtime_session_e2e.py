@@ -21,6 +21,8 @@ from tests.integration._godot import (
     e2e_bridge_url,
     needs_display,
     serve_and_await_editor,
+    wait_probe_connected,
+    wait_until,
 )
 
 pytestmark = [
@@ -89,14 +91,21 @@ async def _run() -> None:
         # register the probe autoload, then play -> the live tree comes back
         await _ok(bridge, "cmd_register_autoload", {"name": "GodotMcpProbe", "path": PROBE})
         await _ok(bridge, "cmd_play_scene", {"scene_path": SCRATCH})
+        await wait_probe_connected(bridge, timeout=30.0)
         tree: dict[str, Any] | None = None
-        for _ in range(30):
+
+        async def _tree_ready() -> bool:
+            nonlocal tree
             state = await _ok(bridge, "cmd_get_game_scene_tree", {})
-            if state["connected"] and state["tree"]:
+            if state.get("connected") and state.get("tree"):
                 tree = state["tree"]
-                break
-            await asyncio.sleep(0.5)
-        assert tree is not None, "probe never delivered the live scene tree"
+                return True
+            return False
+
+        assert await wait_until(_tree_ready, timeout=15.0, interval=0.5), (
+            "probe never delivered the live scene tree"
+        )
+        assert tree is not None
         assert tree["type"] == "Window"  # the game's root viewport
         child_types = [c["type"] for c in tree["children"]]
         assert "Node2D" in child_types  # our played scene root
@@ -104,11 +113,15 @@ async def _run() -> None:
         # #670: a second request with a DISTINCT id returns its own ready tree —
         # the poll serves the reply for THIS request, never the previous call's.
         second: dict[str, Any] = {}
-        for _ in range(30):
+
+        async def _second_tree() -> bool:
+            nonlocal second
             second = await _ok(bridge, "cmd_get_game_scene_tree", {"request_id": "e2e-tree-2"})
-            if second.get("ready") and second.get("tree"):
-                break
-            await asyncio.sleep(0.5)
+            return bool(second.get("ready") and second.get("tree"))
+
+        assert await wait_until(_second_tree, timeout=15.0, interval=0.5), (
+            "second scene-tree request never became ready"
+        )
         assert second.get("tree") is not None, "second scene-tree request never became ready"
         assert second["tree"]["type"] == "Window"
 

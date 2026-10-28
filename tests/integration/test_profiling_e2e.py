@@ -17,6 +17,8 @@ from tests.integration._godot import (
     e2e_bridge_url,
     needs_display,
     serve_and_await_editor,
+    wait_probe_connected,
+    wait_until,
 )
 
 pytestmark = [
@@ -72,12 +74,17 @@ async def _run() -> None:
 
         await _ok(bridge, "cmd_register_autoload", {"name": "GodotMcpProbe", "path": PROBE})
         await _ok(bridge, "cmd_play_scene", {"scene_path": SCRATCH})
+        await wait_probe_connected(bridge, timeout=30.0)
         game: dict[str, Any] = {}
-        for _ in range(30):
+
+        async def _monitors_ready() -> bool:
+            nonlocal game
             game = await _ok(bridge, "cmd_get_performance_monitors", {})
-            if game.get("connected") and game.get("ready") and game.get("monitors"):
-                break
-            await asyncio.sleep(0.5)
+            return bool(game.get("connected") and game.get("ready") and game.get("monitors"))
+
+        assert await wait_until(_monitors_ready, timeout=15.0, interval=0.5), (
+            f"performance monitors never ready (last={game!r})"
+        )
         assert game["connected"] is True
         gm = game["monitors"]
         assert "fps" in gm and "object_count" in gm
@@ -85,13 +92,17 @@ async def _run() -> None:
 
         # #670: a second request with a DISTINCT id returns its own ready snapshot.
         second: dict[str, Any] = {}
-        for _ in range(30):
+
+        async def _second_ready() -> bool:
+            nonlocal second
             second = await _ok(
                 bridge, "cmd_get_performance_monitors", {"request_id": "e2e-perf-2"}
             )
-            if second.get("ready") and second.get("monitors"):
-                break
-            await asyncio.sleep(0.5)
+            return bool(second.get("ready") and second.get("monitors"))
+
+        assert await wait_until(_second_ready, timeout=15.0, interval=0.5), (
+            "second performance request never became ready"
+        )
         assert second.get("monitors"), "second performance request never became ready"
         assert "fps" in second["monitors"]
 

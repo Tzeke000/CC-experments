@@ -185,6 +185,38 @@ async def wait_until(
         await doze(interval)
 
 
+async def wait_probe_connected(
+    bridge: object,
+    *,
+    timeout: float = 30.0,
+    interval: float = 0.5,
+) -> None:
+    """Wait until the runtime probe reports ``connected`` on the game scene tree.
+
+    Wall-clock budget (issue #626), not a fixed iteration count — cold play /
+    Godot 4.8-beta boots under CI load routinely need >15s. Callers that used
+    ``for _ in range(30): sleep(0.5)`` raced the advisory 4.8 lane.
+    """
+    last: dict[str, object] = {}
+
+    async def _connected() -> bool:
+        response = await bridge.send("cmd_get_game_scene_tree", {})  # type: ignore[attr-defined]
+        if not response.ok or response.result is None:
+            last.clear()
+            last["error"] = response.error
+            last["hint"] = response.hint
+            return False
+        last.clear()
+        last.update(response.result)
+        return bool(response.result.get("connected"))
+
+    ok = await wait_until(_connected, timeout=timeout, interval=interval)
+    assert ok, (
+        f"runtime probe never connected within {timeout}s "
+        f"(last cmd_get_game_scene_tree={last!r})"
+    )
+
+
 async def serve_and_await_editor(
     bridge: object,
     attempts: int = 5,

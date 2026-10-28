@@ -39,8 +39,11 @@ func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	if EngineDebugger.is_active():
 		EngineDebugger.register_message_capture("godot_mcp", _capture)
-		_register_output_logger()
+		# Announce ready *before* best-effort output-logger setup. Logger compile /
+		# OS.add_logger can fail on engine betas without killing the rest of the
+		# probe; e2e that only waits on `connected` must not hang on that path.
 		EngineDebugger.send_message("godot_mcp:ready", [])
+		_register_output_logger()
 
 
 func _exit_tree() -> void:
@@ -748,13 +751,20 @@ func _log_error(
 
 
 func _register_output_logger() -> void:
+	## Best-effort: never throw out of ``_ready``. A beta Logger signature drift
+	## or compile failure must leave the probe connected with an empty ring.
 	if not OS.has_method("add_logger"):
 		return
 	var logger_script := GDScript.new()
 	logger_script.source_code = _LOGGER_SOURCE
 	if logger_script.reload() != OK:
+		push_warning("godot-mcp: output Logger script failed to compile; ring stays empty")
 		return
-	_output_logger = logger_script.new(_on_output_line)
+	var instance: Variant = logger_script.new(_on_output_line)
+	if instance == null or not (instance is Object):
+		push_warning("godot-mcp: output Logger instance failed; ring stays empty")
+		return
+	_output_logger = instance as Object
 	OS.call("add_logger", _output_logger)
 
 

@@ -35,6 +35,8 @@ from tests.integration._godot import (
     e2e_bridge_url,
     needs_display,
     serve_and_await_editor,
+    wait_probe_connected,
+    wait_until,
 )
 
 pytestmark = [
@@ -69,22 +71,12 @@ async def _ok(bridge: Bridge, command: str, params: dict[str, Any]) -> dict[str,
     return response.result
 
 
-async def _wait_connected(bridge: Bridge) -> None:
-    for _ in range(30):
-        state = await _ok(bridge, "cmd_get_game_scene_tree", {})
-        if state.get("connected"):
-            return
-        await asyncio.sleep(0.5)
-    raise AssertionError("probe never connected")
-
-
 async def _wait_scene_open(bridge: Bridge) -> None:
-    for _ in range(40):
+    async def _open() -> bool:
         r = await bridge.send("cmd_get_active_scene")
-        if r.ok and (r.result or {}).get("is_open"):
-            return
-        await asyncio.sleep(0.25)
-    raise AssertionError("scene did not open")
+        return bool(r.ok and (r.result or {}).get("is_open"))
+
+    assert await wait_until(_open, timeout=20.0, interval=0.25), "scene did not open"
 
 
 async def _run() -> None:
@@ -104,19 +96,28 @@ async def _run() -> None:
         await _ok(bridge, "cmd_save_scene", {})
         await _ok(bridge, "cmd_register_autoload", {"name": "GodotMcpProbe", "path": PROBE})
         await _ok(bridge, "cmd_play_scene", {"scene_path": SCRATCH})
-        await _wait_connected(bridge)
+        # 30s wall-clock: 4.8-beta advisory lane under full-suite load exceeded
+        # the old fixed 15s (30×0.5) budget while sibling probe tests (25–30s)
+        # still passed — not a Logger API break (same probe connected elsewhere).
+        await wait_probe_connected(bridge, timeout=30.0)
 
         # The game prints via stdout, error, and warning streams; the probe's
         # Logger sink captures all three into the ring. Give the game a moment
         # to emit (the autoload prints at _ready).
         first: dict[str, Any] | None = None
-        for _ in range(20):
+
+        async def _has_entries() -> bool:
+            nonlocal first
             out = await _ok(bridge, "cmd_get_game_output", {})
             if out.get("entries"):
                 first = out
-                break
-            await asyncio.sleep(0.25)
-        assert first is not None, "the game's output ring stayed empty"
+                return True
+            return False
+
+        assert await wait_until(_has_entries, timeout=15.0, interval=0.25), (
+            "the game's output ring stayed empty"
+        )
+        assert first is not None
         entries = first["entries"]
         kinds = {e["kind"] for e in entries}
         texts = [e["text"] for e in entries]
@@ -174,15 +175,21 @@ async def _run() -> None:
         await _ok(bridge, "cmd_play_scene", {"scene_path": SCRATCH})
         # #454: after a play/stop cycle the new game needs a moment to attach a
         # fresh debugger session (the #454 cap diagnostic names the failure mode).
-        await _wait_connected(bridge)
+        await wait_probe_connected(bridge, timeout=30.0)
         replay: dict[str, Any] | None = None
-        for _ in range(20):
+
+        async def _replay_ready() -> bool:
+            nonlocal replay
             out = await _ok(bridge, "cmd_get_game_output", {})
             if out.get("ready") is not False and out.get("entries"):
                 replay = out
-                break
-            await asyncio.sleep(0.25)
-        assert replay is not None, "replay's output ring stayed empty"
+                return True
+            return False
+
+        assert await wait_until(_replay_ready, timeout=15.0, interval=0.25), (
+            "replay's output ring stayed empty"
+        )
+        assert replay is not None
         replay_texts = [e["text"] for e in replay["entries"]]
         assert any("GAME_OUTPUT_STDOUT_MARKER" in t for t in replay_texts), replay_texts
         # No duplication: the fresh session captures its own print exactly once
