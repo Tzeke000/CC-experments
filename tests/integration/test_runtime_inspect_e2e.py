@@ -21,6 +21,7 @@ from tests.integration._godot import (
     e2e_bridge_url,
     needs_display,
     serve_and_await_editor,
+    wait_probe_connected,
 )
 
 pytestmark = [
@@ -53,16 +54,6 @@ async def _wait_scene_open(bridge: Bridge) -> None:
         await asyncio.sleep(0.25)
     raise AssertionError("scene did not open")
 
-
-async def _wait_connected(bridge: Bridge) -> None:
-    # The probe's first connection can lag several seconds behind the play
-    # command under editor cold-start/load.
-    for _ in range(60):
-        state = await _ok(bridge, "cmd_get_game_scene_tree", {})
-        if state.get("connected"):
-            return
-        await asyncio.sleep(0.5)
-    raise AssertionError("probe never connected")
 
 
 async def _poll(bridge: Bridge, command: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -106,7 +97,7 @@ async def _run() -> None:
 
         await _ok(bridge, "cmd_register_autoload", {"name": "GodotMcpProbe", "path": PROBE})
         await _ok(bridge, "cmd_play_scene", {"scene_path": SCRATCH})
-        await _wait_connected(bridge)
+        await wait_probe_connected(bridge, timeout=30.0)
 
         # find the live Button (with text + rect); request_id is stable across the poll
         found = await _poll(

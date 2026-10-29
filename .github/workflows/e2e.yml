@@ -184,9 +184,36 @@ jobs:
           mkdir -p "$dir"
           cd "$dir"
           if [ ! -x godot ]; then
-            curl -fsSL -o "$asset" \
+            # Prefer GitHub Releases (godot-builds) — downloads.godotengine.org
+            # flaked with curl (92) HTTP/2 CANCEL on GH-hosted runners (~1m).
+            # HTTP/1.1 + retries + mirror keep the advisory lane green without
+            # baking a binary into the runner image.
+            urls=(
+              "https://github.com/godotengine/godot-builds/releases/download/${version}/${asset}"
               "https://downloads.godotengine.org/?version=4.8&flavor=beta1&slug=linux.x86_64.zip"
-            echo "${sha512}  ${asset}" | sha512sum -c -
+            )
+            downloaded=0
+            for url in "${urls[@]}"; do
+              for attempt in 1 2 3; do
+                echo "Downloading Godot ${version} from ${url} (attempt ${attempt})"
+                rm -f "$asset"
+                if curl -fsSL --http1.1 --retry 3 --retry-delay 2 --retry-all-errors \
+                     -o "$asset" "$url"; then
+                  if echo "${sha512}  ${asset}" | sha512sum -c -; then
+                    downloaded=1
+                    break 2
+                  fi
+                  echo "::warning::sha512 mismatch for ${url} attempt ${attempt}; retrying"
+                else
+                  echo "::warning::download failed for ${url} attempt ${attempt} (curl $?); retrying"
+                fi
+                sleep $((attempt * 2))
+              done
+            done
+            if [ "$downloaded" != "1" ]; then
+              echo "::error::could not download Godot ${version} from GitHub Releases or downloads.godotengine.org"
+              exit 1
+            fi
             unzip -o -q "$asset"
             chmod +x "Godot_v${version}_linux.x86_64"
             ln -sf "Godot_v${version}_linux.x86_64" godot

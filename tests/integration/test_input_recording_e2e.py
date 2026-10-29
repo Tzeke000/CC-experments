@@ -22,6 +22,7 @@ from tests.integration._godot import (
     e2e_bridge_url,
     needs_display,
     serve_and_await_editor,
+    wait_probe_connected,
 )
 
 pytestmark = [
@@ -55,13 +56,6 @@ async def _wait_scene_open(bridge: Bridge) -> None:
     raise AssertionError("scene did not open")
 
 
-async def _wait_connected(bridge: Bridge) -> None:
-    for _ in range(30):
-        state = await _ok(bridge, "cmd_get_game_scene_tree", {})
-        if state.get("connected"):
-            return
-        await asyncio.sleep(0.5)
-    raise AssertionError("probe never connected")
 
 
 async def _wait_injected(bridge: Bridge, at_least: int) -> None:
@@ -87,7 +81,7 @@ async def _run() -> None:
 
         await _ok(bridge, "cmd_register_autoload", {"name": "GodotMcpProbe", "path": PROBE})
         await _ok(bridge, "cmd_play_scene", {"scene_path": SCRATCH})
-        await _wait_connected(bridge)
+        await wait_probe_connected(bridge, timeout=30.0)
 
         # record, then synthesize input (parse_input_event also fires _input -> captured)
         await _ok(bridge, "cmd_record_input", {})

@@ -54,3 +54,19 @@ uv run python -m evals.making_things_trajectory
 - Default GH-hosted `ci` + `e2e` **do** claim full upstream suite coverage (with Godot downloaded on e2e/floor jobs). They cost more Actions minutes than a dedicated runner.
 - `making-things-smoke` remains the fast PR signal; `ci`/`e2e` are the complete gates.
 - LLM agent evals are **not** in this repo (godot-agents).
+
+## Godot 4.8 beta advisory lane
+
+`e2e.yml` job `live editor (Godot 4.8 beta, advisory)` runs the same integration
+suite on **4.8-beta1** with `continue-on-error: true`. The 4.7.2 lane remains the
+blocking gate.
+
+Known behaviors (do not skip the suite):
+
+| Symptom | Cause / handling |
+|---------|------------------|
+| MeshLibrary items empty after save | Upstream [godot#124712](https://github.com/godotengine/godot/issues/124712); persistence e2e asserts the known-bad shape via `is_godot_48_beta1()` |
+| `probe never connected` on `test_live_game_output` under full-suite load | Fixed-iteration 15s wait raced cold play; use `wait_probe_connected(..., timeout=30)` (#626 wall-clock). Probe now announces `ready` before best-effort Logger setup |
+| Resolve step `curl: (92) HTTP/2 CANCEL` (~1m, no pytest) | `downloads.godotengine.org` HTTP/2 flake on GH-hosted runners. Download prefers `godotengine/godot-builds` Releases, then the mirror, with `--http1.1` + retries; sha512 still pinned |
+
+Prefer real waits / known-bad assertions over silencing the advisory job.

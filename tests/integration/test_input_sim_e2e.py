@@ -21,6 +21,7 @@ from tests.integration._godot import (
     e2e_bridge_url,
     needs_display,
     serve_and_await_editor,
+    wait_probe_connected,
     wait_until,
 )
 
@@ -54,16 +55,6 @@ async def _wait_scene_open(bridge: Bridge) -> None:
     assert await wait_until(_open, timeout=20.0, interval=0.25), "scene did not open"
 
 
-async def _wait_connected(bridge: Bridge) -> None:
-    async def _connected() -> bool:
-        state = await _ok(bridge, "cmd_get_game_scene_tree", {})
-        return bool(state.get("connected"))
-
-    assert await wait_until(_connected, timeout=25.0, interval=0.5), (
-        "runtime probe never connected"
-    )
-
-
 async def _wait_injected(bridge: Bridge, at_least: int) -> int:
     seen = {"injected": 0}
 
@@ -94,7 +85,7 @@ async def _run() -> None:
 
         await _ok(bridge, "cmd_register_autoload", {"name": "GodotMcpProbe", "path": PROBE})
         await _ok(bridge, "cmd_play_scene", {"scene_path": SCRATCH})
-        await _wait_connected(bridge)
+        await wait_probe_connected(bridge, timeout=30.0)
 
         # synthesize three single events; the game acknowledges each
         await _ok(bridge, "cmd_simulate_key", {"key": "Space", "pressed": True})
